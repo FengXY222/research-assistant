@@ -1,0 +1,1685 @@
+{
+  "generated_at": "2026-09-05T16:50:36",
+  "policy_version": "offline-admission-1",
+  "source_items": 203,
+  "context": {
+    "terms": [
+      {
+        "id": "term:term-0c7670d61b7dca74",
+        "text": "digital soil mapping",
+        "aliases": [
+          "digital soil mapping"
+        ],
+        "translation_zh": "数字土壤制图",
+        "weight": 100,
+        "locked": true,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-7604057665ff89e2",
+        "text": "soil organic carbon",
+        "aliases": [
+          "soil organic carbon",
+          "SOC"
+        ],
+        "translation_zh": "土壤有机碳",
+        "weight": 100,
+        "locked": true,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-de6a4c55d05253be",
+        "text": "soil organic carbon mapping",
+        "aliases": [
+          "soil organic carbon mapping"
+        ],
+        "translation_zh": "土壤有机碳制图",
+        "weight": 95,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-ffc24da5a422a5b4",
+        "text": "cropping system",
+        "aliases": [
+          "cropping system"
+        ],
+        "translation_zh": "种植制度",
+        "weight": 80,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-9b02adb9ddd42db1",
+        "text": "cropland conversion",
+        "aliases": [
+          "cropland conversion"
+        ],
+        "translation_zh": "耕地转换",
+        "weight": 75,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-42baecdeb670c970",
+        "text": "interaction effect",
+        "aliases": [
+          "interaction effect"
+        ],
+        "translation_zh": "交互效应",
+        "weight": 75,
+        "locked": false,
+        "role": "method"
+      },
+      {
+        "id": "term:term-a197aa3c3a6aa575",
+        "text": "land use change",
+        "aliases": [
+          "land use change",
+          "land-use change"
+        ],
+        "translation_zh": "土地利用变化",
+        "weight": 75,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-dad3b4d79fbbadb4",
+        "text": "machine learning",
+        "aliases": [
+          "machine learning"
+        ],
+        "translation_zh": "机器学习",
+        "weight": 75,
+        "locked": false,
+        "role": "method"
+      },
+      {
+        "id": "term:term-47a4bd8f013ee4e0",
+        "text": "subsidence",
+        "aliases": [
+          "subsidence"
+        ],
+        "translation_zh": "地面沉降",
+        "weight": 75,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-530e9e9f4e2b4387",
+        "text": "threshold effect",
+        "aliases": [
+          "threshold effect"
+        ],
+        "translation_zh": "阈值效应",
+        "weight": 75,
+        "locked": false,
+        "role": "method"
+      },
+      {
+        "id": "term:term-2ef4235ab3c23aca",
+        "text": "coal mining",
+        "aliases": [
+          "coal mining"
+        ],
+        "translation_zh": "煤炭开采",
+        "weight": 70,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-3566cabf4dab28ef",
+        "text": "mineral-associated organic carbon",
+        "aliases": [
+          "mineral-associated organic carbon"
+        ],
+        "translation_zh": "矿物结合态有机碳",
+        "weight": 70,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-9cc8733e7c94a51f",
+        "text": "partial dependence plot",
+        "aliases": [
+          "partial dependence plot"
+        ],
+        "translation_zh": "偏依赖图",
+        "weight": 70,
+        "locked": false,
+        "role": "method"
+      },
+      {
+        "id": "term:term-fe6afed35e3293d0",
+        "text": "particulate organic carbon",
+        "aliases": [
+          "particulate organic carbon"
+        ],
+        "translation_zh": "颗粒有机碳",
+        "weight": 70,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-e116028afad251c0",
+        "text": "effective range",
+        "aliases": [
+          "effective range"
+        ],
+        "translation_zh": "有效作用范围",
+        "weight": 65,
+        "locked": false,
+        "role": "method"
+      },
+      {
+        "id": "term:term-ee9fde845bf70302",
+        "text": "high-standard farmland",
+        "aliases": [
+          "high-standard farmland"
+        ],
+        "translation_zh": "高标准农田",
+        "weight": 65,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-1c855f3fee0b7e39",
+        "text": "Hot Droughts",
+        "aliases": [
+          "Hot Droughts"
+        ],
+        "translation_zh": "高温干旱",
+        "weight": 55,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-679c1794f6625979",
+        "text": "land use",
+        "aliases": [
+          "land use"
+        ],
+        "translation_zh": "土地利用",
+        "weight": 55,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-380ad5ef2f744fa3",
+        "text": "soil inorganic carbon",
+        "aliases": [
+          "soil inorganic carbon"
+        ],
+        "translation_zh": "土壤无机碳",
+        "weight": 55,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-db1d5098d552cee1",
+        "text": "soil pH",
+        "aliases": [
+          "soil pH"
+        ],
+        "translation_zh": "土壤 pH",
+        "weight": 55,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-625de6e05575bac2",
+        "text": "soil texture",
+        "aliases": [
+          "soil texture"
+        ],
+        "translation_zh": "土壤质地",
+        "weight": 55,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-8d1509634de0c331",
+        "text": "carbon sequestration",
+        "aliases": [
+          "carbon sequestration"
+        ],
+        "translation_zh": "碳固存",
+        "weight": 50,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-a0777ceeb251843b",
+        "text": "carbon stabilization",
+        "aliases": [
+          "carbon stabilization"
+        ],
+        "translation_zh": "碳稳定化",
+        "weight": 50,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-871183362fa6570a",
+        "text": "deep learning",
+        "aliases": [
+          "deep learning"
+        ],
+        "translation_zh": "深度学习",
+        "weight": 50,
+        "locked": false,
+        "role": "method"
+      },
+      {
+        "id": "term:term-65ccffe1aaa20cf8",
+        "text": "geospatial",
+        "aliases": [
+          "geospatial"
+        ],
+        "translation_zh": "地理空间",
+        "weight": 50,
+        "locked": false,
+        "role": "method"
+      },
+      {
+        "id": "term:term-3137753578a7f08d",
+        "text": "remote sensing",
+        "aliases": [
+          "remote sensing"
+        ],
+        "translation_zh": "遥感",
+        "weight": 50,
+        "locked": false,
+        "role": "method"
+      },
+      {
+        "id": "term:term-855ee291e13dc3b3",
+        "text": "soil aggregate",
+        "aliases": [
+          "soil aggregate"
+        ],
+        "translation_zh": "土壤团聚体",
+        "weight": 50,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-10b116b5839eecc9",
+        "text": "soil carbon",
+        "aliases": [
+          "soil carbon"
+        ],
+        "translation_zh": "土壤碳",
+        "weight": 50,
+        "locked": false,
+        "role": "topic"
+      },
+      {
+        "id": "term:term-a0dff5c65a597324",
+        "text": "spatial prediction",
+        "aliases": [
+          "spatial prediction"
+        ],
+        "translation_zh": "空间预测",
+        "weight": 50,
+        "locked": false,
+        "role": "method"
+      }
+    ],
+    "exclusions": [
+      {
+        "id": "exclude:term-c0c09c7e4597c8bb",
+        "text": "microbial",
+        "translation_zh": "微生物",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-558d9ebff7a15b16",
+        "text": "mineral",
+        "translation_zh": "矿物",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-92f424bccb4014ff",
+        "text": "green manure",
+        "translation_zh": "绿肥",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-8f15964d71a6091e",
+        "text": "tea plantation",
+        "translation_zh": "茶园",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-d8416957d80c7c9d",
+        "text": "photovoltaic",
+        "translation_zh": "光伏",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-124928559440335b",
+        "text": "erodibility",
+        "translation_zh": "可蚀性",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-c4df587aa67c908b",
+        "text": "non-point source pollution",
+        "translation_zh": "面源污染",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-0de4b80a5f67aec2",
+        "text": "moss",
+        "translation_zh": "苔藓",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-c3efca86cd0db3ff",
+        "text": "loss-on-ignition",
+        "translation_zh": "烧失量",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-7a750fdcb4d2291b",
+        "text": "conversion factors",
+        "translation_zh": "转换系数",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-8d7d45e274e454ac",
+        "text": "soil health",
+        "translation_zh": "土壤健康",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-9aba5b0cefe706e1",
+        "text": "hydraulic conductivity",
+        "translation_zh": "水力传导度",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-ec406ceac247a225",
+        "text": "vermicompost",
+        "translation_zh": "蚯蚓堆肥",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-d9c83409b95c0b02",
+        "text": "straw return",
+        "translation_zh": "秸秆还田",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-205fed8a5bccdfa7",
+        "text": "biochar",
+        "translation_zh": "生物炭",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-40e6f3039d5beea5",
+        "text": "heavy metal",
+        "translation_zh": "重金属",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-33589214f3c5166b",
+        "text": "preterm birth",
+        "translation_zh": "早产",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-204227bee7e772ba",
+        "text": "food innovation",
+        "translation_zh": "食品创新",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-962ed7e0366a7cf7",
+        "text": "molecular biology",
+        "translation_zh": "分子生物学",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-cd191df6c0ac30a6",
+        "text": "soil microorganisms",
+        "translation_zh": "土壤微生物",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-c84a35995c4a1ba8",
+        "text": "field experiment",
+        "translation_zh": "田间试验",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-0e63c874a67516c9",
+        "text": "experimental field",
+        "translation_zh": "实验田",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-977f122102950fdf",
+        "text": "medical papers",
+        "translation_zh": "医学论文",
+        "locked": false
+      },
+      {
+        "id": "exclude:term-02bc13ff85e95ae8",
+        "text": "materials science",
+        "translation_zh": "材料科学",
+        "locked": false
+      }
+    ],
+    "authored_papers": [
+      {
+        "id": "paper:d6f7518c97504727809563985ab916c2",
+        "title": "Estimating the Net Effect of Rice Cultivation on Soil Organic Carbon Using Planting Trajectories and Causal Forests",
+        "keywords": [
+          "soil organic carbon; rice cultivation; planting trajectory; causal forest; net effect identification"
+        ],
+        "summary": "Rice-growing areas often exhibit elevated soil organic carbon (SOC) levels, yet this observational pattern alone cannot determine whether higher SOC reflects the carbon-sequestration effect of rice cultivation itself or the preferential establishment of rice paddies on sites with favourable water availability and soil fertility. Because conventional machine-learning approaches primarily capture associational patterns and do not explicitly address site-selection bias, the true net carbon-sequestration effect of rice cultivation, together with its spatial heterogeneity, remains poorly quantified at large scales. Here we integrated soil observations across China from 2010 to 2024 (2,942 samples) with nearly two decades of crop distribution data. We developed planting-trajectory metrics to represent long-term cropping history, constructed counterfactual matched samples of rice and non-rice fields under comparable environmental conditions, and applied causal forests to estimate both the net effect of rice cultivation on SOC and its spatial heterogeneity. Incorporating planting trajectories into the base learners of the causal forest substantially improved the representation of SOC variability, increasing R² by 30.4% on average and enhancing the mapped SOC pattern across major grain-producing regions. Trajectory-related variables accounted for 15.3% of cumulative relative importance. The proportion of years under rice cultivation exerted a positive and approximately linear influence on SOC, whereas consecutive rice-cultivation years showed a threshold response at approximately four years: the SOC benefit increased up to this point and declined thereafter, while remaining positive overall. Causal estimates indicated a significant positive net effect of rice cultivation on SOC, with an average treatment effect (ATE) of 1.618 g kg⁻¹ (p < 0.001), corresponding to a relative increase of 19.36% compared to the study-wide mean SOC of 8.356 g·kg⁻¹. Conditional average treatment effects (CATE) exhibited pronounced spatial heterogeneity, with stronger SOC gains in the North China Plain, the Huang-Huai-Hai Plain and the Jianghuai region, highlighting these areas as priority regions for paddy-field optimization and cropland carbon management. Rice-induced SOC gains were promoted by warmer and wetter climatic conditions and weaker topographic constraints, and were greatest in neutral to slightly alkaline, fine-textured, and relatively nutrient-limited soils. In contrast, SOC differences between rice and non-rice systems were smaller in nutrient-rich soils. By integrating long-term cropping history with causal inference, this study advances SOC assessment from association-based prediction towards effect-oriented estimation. It provides a useful observational causal-inference framework for estimating the contribution of cropping systems to soil carbon accumulation and offers new insights for spatially targeted cropland carbon management."
+      },
+      {
+        "id": "paper:5b3e224f67e84f58a132284f18fa5be6",
+        "title": "Spatially Heterogeneous influencing Factors of Landslide Susceptibility in Xinjiang, China, Revealed by an XGBoost-SHAP Model",
+        "keywords": [],
+        "summary": ""
+      },
+      {
+        "id": "paper:22e644637f4c4a2cbea19c83dd201282",
+        "title": "基于极端降水数据的新疆能源通道滑坡易发性评价",
+        "keywords": [],
+        "summary": ""
+      },
+      {
+        "id": "paper:6e9d5bf6c65b4720ac6f5aea4b555948",
+        "title": "Incorporating Accumulation and Legacy Effects of Environmental Variables for Soil Organic Carbon Mapping in the Tianshan Mountains, China",
+        "keywords": [
+          "soil organic carbon; arid and semi-arid regions; spatial prediction; time series environmental variables; accumulation and legacy effect."
+        ],
+        "summary": "The Tianshan Mountains in Xinjiang, China, represent a typical ecologically sensitive region in the arid and semi-arid zone of Central Asia. Accurately mapping soil organic carbon (SOC) in this region and revealing its dominant controlling factors are of great significance for regional carbon assessment and ecological security. Conventional digital soil mapping methods mostly rely on environmental variables from a single year, failing to account for the temporal accumulation effects of environmental factors or the legacy impacts of extreme years. To address this issue, this study utilized 463 soil sampling data points and introduced time-series environmental variables over the past decade, including both single-year variables and multi-year mean variables. Multiple machine learning models were employed to predict the spatial distribution of SOC. The results showed that after introducing a set of time-series variables centered on the second year before sampling, the optimal model’s predictive R² increased from 0.682 to 0.751, and the root mean square error decreased by 18.2%. The SOC in the study area exhibited a pattern of higher values in the north and lower values in the south, with high-value areas showing a V-shaped belt distribution. SHAP analysis revealed contrasting dominant controls: elevation and pH governed SOC in the mountain belt, whereas the soil coloration index dominated in the lowlands. Further analysis of time-series variable importance revealed that both accumulation and legacy effects were concentrated in the time-series variables centered on the second year before sampling. This may be attributed to a compound drought-low temperature anomaly that occurred in that year, which had a persistent impact on vegetation growth and subsequent soil carbon inputs. This study confirms the necessity of incorporating temporal accumulation and legacy effects into SOC prediction and offers a methodological reference for digital SOC mapping in arid and semi-arid regions."
+      }
+    ],
+    "conflicts": [
+      {
+        "excluded_ref": "exclude:term-558d9ebff7a15b16",
+        "active_ref": "term:term-3566cabf4dab28ef",
+        "reason": "A broad exclusion overlaps a more specific active concept"
+      }
+    ],
+    "policy_version": "offline-admission-1"
+  },
+  "metrics": {
+    "total": 40,
+    "routes": {
+      "rejected": 30,
+      "pending_content": 7,
+      "journal": 2,
+      "pending_quality": 1
+    },
+    "reference_positive_total": 6,
+    "reference_positive_accepted": 3,
+    "reference_positive_rejected": 2,
+    "reference_positive_pending": 1,
+    "reference_negative_total": 20,
+    "reference_negative_accepted": 0,
+    "reference_negative_rejected": 14,
+    "reference_negative_pending": 6,
+    "reference_boundary_total": 14,
+    "reference_boundary_accepted": 0,
+    "reference_boundary_rejected": 14,
+    "reference_boundary_pending": 0
+  },
+  "rows": [
+    {
+      "id": "10.1186/s12909-026-10328-1",
+      "title": "EducaPlay gamified digital assessment versus traditional assessment in undergraduate nursing education: a quasi experimental study",
+      "journal": "BMC Medical Education",
+      "expected_group": "negative",
+      "reference_note": "护理教育，非土壤研究",
+      "old_score": 65,
+      "old_status": "new",
+      "old_reason": "与核心关键词“digital soil mapping”直接相关",
+      "new": {
+        "id": "10.1186/s12909-026-10328-1",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "论文主题为护理教育中的游戏化数字评估，与数字土壤制图、土壤有机碳等研究画像完全无关，属于医学教育领域，无任何交叉联系。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "EducaPlay gamified digital assessment versus traditional assessment in undergraduate nursing education"
+        ],
+        "profile_refs": [],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-977f122102950fdf"
+        ],
+        "exclusion_reason_cn": "文章属于医学教育研究，与医学论文排除词直接对应。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1186/s12889-026-29111-4",
+      "title": "Research on the relationship between mental health and physical health of college students: a retrospective cohort study",
+      "journal": "BMC Public Health",
+      "expected_group": "negative",
+      "reference_note": "大学生健康，非研究方向",
+      "old_score": 65,
+      "old_status": "new",
+      "old_reason": "与核心关键词“cropping system”直接相关",
+      "new": {
+        "id": "10.1186/s12889-026-29111-4",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "论文研究大学生心理健康与体质健康的关系，属于公共卫生与教育领域，与土壤有机碳制图、机器学习等画像主题无任何关联。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Research on the relationship between mental health and physical health of college students: a retrospective cohort study"
+        ],
+        "profile_refs": [],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-977f122102950fdf"
+        ],
+        "exclusion_reason_cn": "文章属于医学/公共卫生研究，与医学论文排除词直接对应。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1186/s12864-026-13314-5",
+      "title": "Hoxc13 polyglycine repeat gain-of-function contributes to mammalian integument evolution by altering targeted genes and interactions",
+      "journal": "BMC Genomics",
+      "expected_group": "negative",
+      "reference_note": "哺乳动物基因，非研究方向",
+      "old_score": 65,
+      "old_status": "new",
+      "old_reason": "与核心关键词“cropping system”直接相关",
+      "new": {
+        "id": "10.1186/s12864-026-13314-5",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "论文研究哺乳动物毛发进化中Hoxc13蛋白的功能，属于分子生物学与进化生物学领域，与土壤有机碳、数字土壤制图等画像主题完全无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Hoxc13 polyglycine repeat gain-of-function contributes to mammalian integument evolution"
+        ],
+        "profile_refs": [],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-962ed7e0366a7cf7"
+        ],
+        "exclusion_reason_cn": "文章主要研究基因调控与分子机制，属于分子生物学排除词范畴。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1126/sciadv.aej0987",
+      "title": "Functional mapping and engineering of the Sec translocon unlocked by a cell-free system",
+      "journal": "Science Advances",
+      "expected_group": "negative",
+      "reference_note": "膜蛋白系统，mapping词义不同",
+      "old_score": 65,
+      "old_status": "new",
+      "old_reason": "与核心关键词“digital soil mapping”直接相关",
+      "new": {
+        "id": "10.1126/sciadv.aej0987",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "论文研究膜蛋白转运的Sec转位子功能与工程改造，属于合成生物学与生物技术领域，与土壤有机碳、数字土壤制图等画像主题完全无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Functional mapping and engineering of the Sec translocon unlocked by a cell-free system"
+        ],
+        "profile_refs": [],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-02bc13ff85e95ae8"
+        ],
+        "exclusion_reason_cn": "文章涉及蛋白质工程与合成生物学，属于材料科学/生物技术范畴，与排除词相关。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1126/sciadv.aed1511",
+      "title": "A newly established reverse genetic system for a circular RNA virus reveals new requirements for infection and its biocontrol potential",
+      "journal": "Science Advances",
+      "expected_group": "negative",
+      "reference_note": "病毒遗传系统，非研究方向",
+      "old_score": 65,
+      "old_status": "new",
+      "old_reason": "与核心关键词“cropping system”直接相关",
+      "new": {
+        "id": "10.1126/sciadv.aed1511",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "论文研究真菌RNA病毒的反向遗传系统及其生物防治潜力，属于植物病理学与病毒学领域，与土壤有机碳、数字土壤制图等画像主题完全无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "A newly established reverse genetic system for a circular RNA virus reveals new requirements for infection and its biocontrol potential"
+        ],
+        "profile_refs": [],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-962ed7e0366a7cf7"
+        ],
+        "exclusion_reason_cn": "文章涉及病毒分子生物学与遗传操作，属于分子生物学排除词范畴。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1021/jacs.6c11666",
+      "title": "Core-Regenerating Atom-Pair Exchange Enables Skeletal Carbon Isotope Incorporation into Pyridines",
+      "journal": "Journal of the American\nChemical Society",
+      "expected_group": "negative",
+      "reference_note": "有机合成碳同位素，非土壤碳",
+      "old_score": 65,
+      "old_status": "dismissed",
+      "old_reason": "与核心关键词“soil organic carbon”直接相关",
+      "new": {
+        "id": "10.1021/jacs.6c11666",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "文章主要研究有机合成方法，涉及碳同位素标记吡啶，与土壤有机碳、数字土壤制图等画像方向完全无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Core-Regenerating Atom-Pair Exchange Enables Skeletal Carbon Isotope Incorporation into Pyridines",
+          "selective replacement of a pyridine carbon atom with an isotopically labeled counterpart"
+        ],
+        "profile_refs": [],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1007/s10443-026-10535-5",
+      "title": "Thermo-Chemo-Mechanical Coupled Response Analysis of Isotropic Short Carbon Fiber-Reinforced Rubber Matrix Composites under High-Temperature Ablation",
+      "journal": "Applied Composite Materials",
+      "expected_group": "negative",
+      "reference_note": "碳纤维材料，非土壤碳",
+      "old_score": 65,
+      "old_status": "dismissed",
+      "old_reason": "与核心关键词“soil organic carbon”直接相关",
+      "new": {
+        "id": "10.1007/s10443-026-10535-5",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "文章研究碳纤维增强橡胶复合材料的高温烧蚀响应，属于材料科学领域，与土壤有机碳制图、土地利用变化等画像方向无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Thermo-Chemo-Mechanical Coupled Response Analysis of Isotropic Short Carbon Fiber-Reinforced Rubber Matrix Composites under High-Temperature Ablation"
+        ],
+        "profile_refs": [],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-02bc13ff85e95ae8"
+        ],
+        "exclusion_reason_cn": "主要研究问题属于材料科学，与画像排除词'材料科学'直接冲突。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.3389/fchem.2026.1921103",
+      "title": "Single-atom ruthenium on nitrogen-doped carbon for catalytic polysulfide conversion in lithium–sulfur batteries",
+      "journal": "Frontiers in Chemistry",
+      "expected_group": "negative",
+      "reference_note": "电池碳材料，非土壤碳",
+      "old_score": 65,
+      "old_status": "dismissed",
+      "old_reason": "与核心关键词“cropland conversion”直接相关",
+      "new": {
+        "id": "10.3389/fchem.2026.1921103",
+        "content_decision": "pending",
+        "route": "pending_content",
+        "score": null,
+        "relation": "uncertain",
+        "reason_cn": "未取得完整、可核对的内容判断。",
+        "validation_issue": "ungrounded_evidence",
+        "evidence_quotes": [],
+        "profile_refs": [],
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1111/jfb.70615",
+      "title": "Navigating morphometric minefields: Modelling heteroscedasticity in length‐conversion models",
+      "journal": "Journal of Fish Biology",
+      "expected_group": "negative",
+      "reference_note": "鱼类长度换算，非耕地转化",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“cropland conversion”直接相关",
+      "new": {
+        "id": "10.1111/jfb.70615",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "文章研究鲨鱼长度转换模型的异方差性，属于鱼类生物学和统计学方法，与土壤有机碳、数字土壤制图等画像方向无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Navigating morphometric minefields: Modelling heteroscedasticity in length‐conversion models",
+          "conversion models built with data from defrosted specimens can be used on data from fresh (or live) individuals"
+        ],
+        "profile_refs": [],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1057/s41599-026-08925-y",
+      "title": "Why do consumers continue to use online-to-offline delivery services? Moderating roles of social anxiety",
+      "journal": "Humanities and Social Sciences Communications",
+      "expected_group": "negative",
+      "reference_note": "social不是SOC",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“SOC”直接相关",
+      "new": {
+        "id": "10.1057/s41599-026-08925-y",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "文章研究消费者对O2O配送服务的持续使用意愿及社交焦虑的调节作用，属于消费者行为学，与土壤有机碳、数字土壤制图等画像方向无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Why do consumers continue to use online-to-offline delivery services? Moderating roles of social anxiety"
+        ],
+        "profile_refs": [],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1038/s41598-026-70402-y",
+      "title": "Prediction of dielectric behaviour of FDM printed-acrylonitrile butadiene styrene (ABS) reinforced with 10% carbon fiber: a machine learning approach",
+      "journal": "Scientific Reports",
+      "expected_group": "negative",
+      "reference_note": "仅共享机器学习和carbon",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“soil organic carbon mapping”直接相关",
+      "new": {
+        "id": "10.1038/s41598-026-70402-y",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "论文研究FDM打印ABS材料介电行为预测，属于材料科学领域，与土壤有机碳制图、土地利用变化等画像方向无任何关联。仅共同使用机器学习方法不足以构成相关性。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Prediction of dielectric behaviour of FDM printed-acrylonitrile butadiene styrene (ABS) reinforced with 10% carbon fiber: a machine learning approach"
+        ],
+        "profile_refs": [
+          "term:term-dad3b4d79fbbadb4"
+        ],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-02bc13ff85e95ae8"
+        ],
+        "exclusion_reason_cn": "论文主要研究材料科学中的介电性能，属于材料科学排除范畴。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1021/acs.orglett.6c03083",
+      "title": "Photoredox-Catalyzed Trifunctionalization of β,γ -Unsaturated Ketones Enabled by Four-Component 1,2-Carbonyl Migration/Radical-Polar Crossover Cascade",
+      "journal": "Organic Letters",
+      "expected_group": "negative",
+      "reference_note": "有机合成，检索命中不是证据",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“soil organic carbon”直接相关",
+      "new": {
+        "id": "10.1021/acs.orglett.6c03083",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "论文为有机合成方法学研究，涉及光氧化还原催化反应，与土壤有机碳、数字土壤制图等画像方向完全无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Photoredox-Catalyzed Trifunctionalization of β,γ -Unsaturated Ketones Enabled by Four-Component 1,2-Carbonyl Migration/Radical-Polar Crossover Cascade"
+        ],
+        "profile_refs": [],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1523/jneurosci.1323-25.2026",
+      "title": "Hyperpolarization-activated cation channels confer tonotopic specialization for temporal encoding of sound frequency in the cochlear nucleus",
+      "journal": "Journal of Neuroscience",
+      "expected_group": "negative",
+      "reference_note": "神经科学，非研究方向",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“cropping system”直接相关",
+      "new": {
+        "id": "10.1523/jneurosci.1323-25.2026",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "论文研究听觉脑干核团中离子通道的tonotopic分布及功能，属于神经科学领域，与土壤有机碳、土地利用等画像方向无任何关联。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Hyperpolarization-activated cation channels confer tonotopic specialization for temporal encoding of sound frequency in the cochlear nucleus"
+        ],
+        "profile_refs": [],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1126/sciadv.aed8384",
+      "title": "Lenacapavir allosterically remodels the HIV-1 capsid",
+      "journal": "Science Advances",
+      "expected_group": "negative",
+      "reference_note": "HIV结构，非研究方向",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“cropping system”直接相关",
+      "new": {
+        "id": "10.1126/sciadv.aed8384",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "论文研究HIV-1衣壳抑制剂Lenacapavir的作用机制，属于病毒学和结构生物学领域，与土壤有机碳、数字土壤制图等画像方向完全无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Lenacapavir allosterically remodels the HIV-1 capsid"
+        ],
+        "profile_refs": [],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1128/spectrum.04173-25",
+      "title": "Enhancing meningitis diagnosis: a diagnostic stewardship workflow in a resource-limited setting",
+      "journal": "Microbiology Spectrum",
+      "expected_group": "negative",
+      "reference_note": "脑膜炎诊断，非研究方向",
+      "old_score": 65,
+      "old_status": "dismissed",
+      "old_reason": "与核心关键词“SOC”直接相关",
+      "new": {
+        "id": "10.1128/spectrum.04173-25",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "论文研究脑膜炎诊断流程优化，属于医学领域。摘要中SoC指标准治疗，非土壤有机碳，且论文主题与土壤有机碳、数字土壤制图等画像方向完全无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Enhancing meningitis diagnosis: a diagnostic stewardship workflow in a resource-limited setting",
+          "standard of care [SoC]"
+        ],
+        "profile_refs": [],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-977f122102950fdf"
+        ],
+        "exclusion_reason_cn": "论文为医学论文，属于医学论文排除范畴。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1136/jitc-2026-015414",
+      "title": "Overall survival of immunotherapy versus standard of care in chemorefractory microsatellite stable metastatic colorectal cancer: a propensity score matched analysis of 708 patients",
+      "journal": "Journal for ImmunoTherapy of Cancer",
+      "expected_group": "negative",
+      "reference_note": "SOC表示标准治疗",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“SOC”直接相关",
+      "new": {
+        "id": "10.1136/jitc-2026-015414",
+        "content_decision": "pending",
+        "route": "pending_content",
+        "score": null,
+        "relation": "uncertain",
+        "reason_cn": "未取得完整、可核对的内容判断。",
+        "validation_issue": "ungrounded_evidence",
+        "evidence_quotes": [],
+        "profile_refs": [],
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1109/access.2026.3725118",
+      "title": "A Multi-Interface Real-Time Vision Architecture for Rice Sorting: CPU/GPU Benchmarking and Deployed SoC–FPGA Evaluation",
+      "journal": "IEEE Access",
+      "expected_group": "negative",
+      "reference_note": "SoC芯片和稻米分选，非稻田土壤研究",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“SOC”直接相关",
+      "new": {
+        "id": "10.1109/access.2026.3725118",
+        "content_decision": "pending",
+        "route": "pending_content",
+        "score": null,
+        "relation": "uncertain",
+        "reason_cn": "未取得完整、可核对的内容判断。",
+        "validation_issue": "ungrounded_evidence",
+        "evidence_quotes": [],
+        "profile_refs": [],
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.69930/fsst.v3i2.917",
+      "title": "Analysis of the Effectiveness of Red Andong Leaf Extract (Cordyline fruticosa) as an Alternative to 2% Eosin in the Examination of Soil-Transmitted Helminth Eggs",
+      "journal": "Frontiers in Sustainable Science and Technology",
+      "expected_group": "negative",
+      "reference_note": "soil-transmitted为寄生虫医学语境",
+      "old_score": 65,
+      "old_status": "new",
+      "old_reason": "与核心关键词“soil organic carbon”直接相关",
+      "new": {
+        "id": "10.69930/fsst.v3i2.917",
+        "content_decision": "pending",
+        "route": "pending_content",
+        "score": null,
+        "relation": "uncertain",
+        "reason_cn": "未取得完整、可核对的内容判断。",
+        "validation_issue": "ungrounded_evidence",
+        "evidence_quotes": [],
+        "profile_refs": [],
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.3791/30055",
+      "title": "Bisulfite Conversion of Genomic DNA: A Method to Study DNA Methylation in Genomic DNA Samples from Gastrointestinal Cancer Tissue",
+      "journal": "Journal of Visualized Experiments",
+      "expected_group": "negative",
+      "reference_note": "DNA conversion不是土地转化",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“cropland conversion”直接相关",
+      "new": {
+        "id": "10.3791/30055",
+        "content_decision": "pending",
+        "route": "pending_content",
+        "score": null,
+        "relation": "uncertain",
+        "reason_cn": "未取得完整、可核对的内容判断。",
+        "validation_issue": "ungrounded_evidence",
+        "evidence_quotes": [],
+        "profile_refs": [],
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1021/acs.est.6c06240",
+      "title": "Entropy-Driven Modulation of Lattice Oxygen Stabilization and Oxygen Activation for Durable and Efficient Volatile Organic Oxidation",
+      "journal": "Environmental Science &amp;\nTechnology",
+      "expected_group": "negative",
+      "reference_note": "催化材料，不能因环境期刊就通过",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“soil organic carbon”直接相关",
+      "new": {
+        "id": "10.1021/acs.est.6c06240",
+        "content_decision": "pending",
+        "route": "pending_content",
+        "score": null,
+        "relation": "uncertain",
+        "reason_cn": "未取得完整、可核对的内容判断。",
+        "validation_issue": "ungrounded_evidence",
+        "evidence_quotes": [],
+        "profile_refs": [],
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1016/j.geoderma.2026.118004",
+      "title": "Spatiotemporal controls on soil organic carbon stocks in subtropical grazing lands: An uncertainty-aware digital soil mapping approach",
+      "journal": "Geoderma",
+      "expected_group": "positive",
+      "reference_note": "SOC数字制图及不确定性，明确核心",
+      "old_score": 90,
+      "old_status": "read",
+      "old_reason": "与核心关键词“digital soil mapping”直接相关",
+      "new": {
+        "id": "10.1016/j.geoderma.2026.118004",
+        "content_decision": "accept",
+        "route": "journal",
+        "score": 95,
+        "relation": "core",
+        "reason_cn": "文章核心是数字土壤制图框架用于土壤有机碳储量空间量化与不确定性估计，直接对应画像中的digital soil mapping和soil organic carbon，且采用机器学习（Quantile Regression Forests）和SHAP解释，与画像方法高度契合。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Accurate spatial quantification of soil organic carbon (SOC) stocks and their associated uncertainties is vital for climate mitigation and sustainable grazing management.",
+          "This study advances regional SOC mapping by developing a parsimonious, uncertainty-aware digital soil mapping framework to estimate topsoil (0–20 cm) SOC stocks across Florida’s grazing lands at 30 m resolution."
+        ],
+        "profile_refs": [
+          "term:term-0c7670d61b7dca74",
+          "term:term-7604057665ff89e2",
+          "term:term-679c1794f6625979",
+          "term:term-10b116b5839eecc9"
+        ],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "quality_status": "verified",
+        "jcr_quartile": "1",
+        "quality_source": "item",
+        "quality_reason": "cached_evidence_only",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1016/j.geoderma.2026.118011",
+      "title": "Explicit depth representation improves the 3D modelling of soil carbon to nitrogen ratio in croplands",
+      "journal": "Geoderma",
+      "expected_group": "positive",
+      "reference_note": "土壤C:N三维制图，明确内容联系",
+      "old_score": 80,
+      "old_status": "read",
+      "old_reason": "与核心关键词“digital soil mapping”直接相关",
+      "new": {
+        "id": "10.1016/j.geoderma.2026.118011",
+        "content_decision": "accept",
+        "route": "journal",
+        "score": 85,
+        "relation": "core",
+        "reason_cn": "文章聚焦于数字土壤制图框架在农田土壤碳氮比三维建模中的应用，直接涉及土壤有机碳（作为C:N比组分）和数字土壤制图方法，与画像核心方向一致。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Accurate mapping of the C:N ratio is essential for evaluating sustainable agricultural practices, as it reflects the balance between soil organic carbon (SOC) and total nitrogen (TN) stabilization.",
+          "we evaluated the predictive performance of 2.5D and 3D digital soil mapping (DSM) frameworks for soil C:N ratio to a depth of 1 m."
+        ],
+        "profile_refs": [
+          "term:term-0c7670d61b7dca74",
+          "term:term-7604057665ff89e2",
+          "term:term-10b116b5839eecc9"
+        ],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "quality_status": "verified",
+        "jcr_quartile": "1",
+        "quality_source": "item",
+        "quality_reason": "cached_evidence_only",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1016/j.still.2026.107192",
+      "title": "Spatial patterns and drivers of SOC and its labile fractions in China's croplands",
+      "journal": "Soil and Tillage Research",
+      "expected_group": "positive",
+      "reference_note": "SOC组分空间格局与驱动，标题有明确证据",
+      "old_score": 88,
+      "old_status": "read",
+      "old_reason": "与核心关键词“SOC”直接相关",
+      "new": {
+        "id": "10.1016/j.still.2026.107192",
+        "content_decision": "pending",
+        "route": "pending_content",
+        "score": null,
+        "relation": "uncertain",
+        "reason_cn": "未取得完整、可核对的内容判断。",
+        "validation_issue": "ungrounded_evidence",
+        "evidence_quotes": [],
+        "profile_refs": [],
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1016/j.eja.2026.128237",
+      "title": "Soil organic carbon fractions under conventional and no-till management: Insights from legacy total SOC data supported by process-based modelling",
+      "journal": "European Journal of Agronomy",
+      "expected_group": "positive",
+      "reference_note": "SOC组分和过程建模，不能因摘要缺失一律剔除",
+      "old_score": 80,
+      "old_status": "read",
+      "old_reason": "与核心关键词“digital soil mapping”直接相关",
+      "new": {
+        "id": "10.1016/j.eja.2026.128237",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 20,
+        "relation": "unrelated",
+        "reason_cn": "标题表明研究主要关注耕作管理（常规与免耕）对土壤有机碳组分的影响，并利用过程模型，属于田间试验或管理效应研究，与画像核心的数字土壤制图、机器学习空间预测方向不符。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Soil organic carbon fractions under conventional and no-till management: Insights from legacy total SOC data supported by process-based modelling"
+        ],
+        "profile_refs": [
+          "term:term-7604057665ff89e2"
+        ],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-c84a35995c4a1ba8"
+        ],
+        "exclusion_reason_cn": "文章主要研究问题涉及田间管理对比（常规与免耕），属于田间试验范畴，与排除词'field experiment'语义相关。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.3390/agriculture16161694",
+      "title": "Associations of Land Use and Conservation Measures with Soil Organic Carbon in Small Watersheds of the Black Soil Region of Northeast China",
+      "journal": "Agriculture",
+      "expected_group": "positive",
+      "reference_note": "土地利用、SOC和随机森林，内容相关与分区分开",
+      "old_score": 160,
+      "old_status": "read",
+      "old_reason": "标题/摘要回退：关键词得分 160 分：一级“土壤有机碳、土壤有机碳（SOC）”；二级“土壤有机碳、土壤有机碳（SOC）”",
+      "new": {
+        "id": "10.3390/agriculture16161694",
+        "content_decision": "accept",
+        "route": "pending_quality",
+        "score": 78,
+        "relation": "transferable",
+        "reason_cn": "文章研究土地利用与保持措施对土壤有机碳的影响，使用随机森林识别因子关联，虽非直接数字土壤制图，但其土地利用变化与SOC关系、机器学习方法可迁移至画像中的耕地转换与交互效应研究。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "This study compared SOC content and its associated factors in two small watersheds in the hilly black soil region of Northeast China that share similar topographic and climatic conditions but differ in the adoption of slope cropland conservation measures.",
+          "a random forest model was used to identify the association of each factor with SOC content."
+        ],
+        "profile_refs": [
+          "term:term-7604057665ff89e2",
+          "term:term-679c1794f6625979",
+          "term:term-db1d5098d552cee1"
+        ],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "quality_status": "unknown",
+        "jcr_quartile": "",
+        "quality_source": "",
+        "quality_reason": "cached_evidence_only",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.3390/rs18172924",
+      "title": "Multi-Temporal Remote Sensing Assessment and Pareto-Based Land-Use Optimization for Balancing Carbon Storage, Ecological Value, and Economic Value in Jiangsu Province, China",
+      "journal": "Remote Sensing",
+      "expected_group": "positive",
+      "reference_note": "土地变化与碳储量时空分析，可有明确联系",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“cropland conversion”直接相关",
+      "new": {
+        "id": "10.3390/rs18172924",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 30,
+        "relation": "unrelated",
+        "reason_cn": "文章主要研究生态系统碳储量（非土壤有机碳）与土地利用优化，虽涉及土地利用变化和遥感，但核心是碳储量总量与多目标规划，未聚焦土壤有机碳制图或土壤碳库，与画像方向（数字土壤制图、土壤有机碳）无直接或可迁移联系。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Ecosystem carbon storage is highly sensitive to land-use/land-cover change (LUCC).",
+          "the carbon storage maximization scenario produced the highest carbon storage (1497.47 Mt)"
+        ],
+        "profile_refs": [
+          "term:term-679c1794f6625979",
+          "term:term-3137753578a7f08d"
+        ],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.3390/w18172183",
+      "title": "Regional Patterns of Dissolved Organic Carbon in Lakes and Reservoirs Across Four Major Climate Regions of China",
+      "journal": "Water",
+      "expected_group": "boundary",
+      "reference_note": "水体DOC时空建模，是否接受对象迁移",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“soil organic carbon”直接相关",
+      "new": {
+        "id": "10.3390/w18172183",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 20,
+        "relation": "unrelated",
+        "reason_cn": "研究对象为湖泊水库溶解有机碳（DOC），属于水体碳循环，非土壤有机碳；虽使用随机森林，但未涉及土壤有机碳制图或土壤过程，与画像方向无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Dissolved organic carbon (DOC) is a climate-sensitive component of carbon cycling in inland waters",
+          "the long-term mean DOC concentrations were 9.78, 14.10, 16.12, and 15.14 mg L−1"
+        ],
+        "profile_refs": [],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1057/s41599-026-08869-3",
+      "title": "Decoding the urban energy transition of the Yangtze River Economic Belt: spatio-temporal trends and predictor contributions via interpretable machine learning",
+      "journal": "Humanities and Social Sciences Communications",
+      "expected_group": "boundary",
+      "reference_note": "城市能源与可解释机器学习，迁移依据薄弱",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“SOC”直接相关",
+      "new": {
+        "id": "10.1057/s41599-026-08869-3",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 25,
+        "relation": "unrelated",
+        "reason_cn": "标题表明研究城市能源转型，与土壤有机碳、数字土壤制图无关；仅使用机器学习方法，但对象完全不同，无迁移价值。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Decoding the urban energy transition of the Yangtze River Economic Belt: spatio-temporal trends and predictor contributions via interpretable machine learning"
+        ],
+        "profile_refs": [
+          "term:term-dad3b4d79fbbadb4"
+        ],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1038/s41598-026-69512-4",
+      "title": "Reconstructing missing data by comparing imputation and interpolation techniques: applications for long-term groundwater monitoring",
+      "journal": "Scientific Reports",
+      "expected_group": "boundary",
+      "reference_note": "地下水缺失数据处理，缺摘要",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“soil organic carbon”直接相关",
+      "new": {
+        "id": "10.1038/s41598-026-69512-4",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 15,
+        "relation": "unrelated",
+        "reason_cn": "研究地下水监测数据插补，与土壤有机碳、数字土壤制图无关，方法虽可迁移但对象差异过大，且无具体联系。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Reconstructing missing data by comparing imputation and interpolation techniques: applications for long-term groundwater monitoring"
+        ],
+        "profile_refs": [],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.3390/w18172162",
+      "title": "DEMands of Precision: How DEM Resolution Shapes Various Flood Applications",
+      "journal": "Water",
+      "expected_group": "boundary",
+      "reference_note": "DEM分辨率与洪水易发性，关联已有滑坡论文",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“digital soil mapping”直接相关",
+      "new": {
+        "id": "10.3390/w18172162",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 10,
+        "relation": "unrelated",
+        "reason_cn": "研究DEM分辨率对洪水应用的影响，与土壤有机碳、数字土壤制图无关，且未涉及土壤属性。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Digital elevation models (DEM) form the backbone of flood related studies.",
+          "How DEM Resolution Shapes Various Flood Applications"
+        ],
+        "profile_refs": [],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1016/j.rse.2026.115644",
+      "title": "Using a planted tree biodiversity experiment to evaluate imaging spectroscopy for species classification",
+      "journal": "Remote Sensing of Environment",
+      "expected_group": "boundary",
+      "reference_note": "树种高光谱分类，仅方法邻近",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“cropping system”直接相关",
+      "new": {
+        "id": "10.1016/j.rse.2026.115644",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "文章主题为树种分类与成像光谱评估，与数字土壤制图、土壤有机碳等画像方向无直接或可迁移联系。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Using a planted tree biodiversity experiment to evaluate imaging spectroscopy for species classification"
+        ],
+        "profile_refs": [],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.5194/hess-30-5521-2026",
+      "title": "Integrating Physical-Based Xinanjiang Model and Deep Learning for Interpretable Streamflow Simulation: A Multi-Source Data Fusion Approach across Diverse Chinese Basins",
+      "journal": "Hydrology and earth system sciences",
+      "expected_group": "boundary",
+      "reference_note": "过程模型结合深度学习和SHAP，水文对象迁移",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“soil organic carbon mapping”直接相关",
+      "new": {
+        "id": "10.5194/hess-30-5521-2026",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 10,
+        "relation": "unrelated",
+        "reason_cn": "文章主要研究径流模拟，虽使用深度学习和SHAP，但研究对象为水文而非土壤有机碳或数字土壤制图，方法不可直接迁移至SOC制图。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "This study integrated process-driven hydrological mechanism models with data-driven deep learning models",
+          "achieving high Nash-Sutcliffe Efficiency (NSE) values with 0.991, 0.971, 0.984, and 0.986"
+        ],
+        "profile_refs": [
+          "term:term-871183362fa6570a"
+        ],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.3389/fsufs.2026.1930186",
+      "title": "Beyond soil quality mapping: integrating fertility indices and TOPSIS for sustainable land management in arid areas",
+      "journal": "Frontiers in Sustainable Food Systems",
+      "expected_group": "boundary",
+      "reference_note": "土壤质量制图与soil health排除边界",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“cropland conversion”直接相关",
+      "new": {
+        "id": "10.3389/fsufs.2026.1930186",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 20,
+        "relation": "unrelated",
+        "reason_cn": "文章主要研究土壤肥力与质量评价，虽涉及土地利用和土壤团聚体，但未聚焦土壤有机碳制图或数字土壤制图，且土壤健康为排除词，主要问题非SOC。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "evaluate soil fertility and quality across different land management practices",
+          "soil aggregate stability index (SASI) averaged 1.81"
+        ],
+        "profile_refs": [
+          "term:term-679c1794f6625979",
+          "term:term-855ee291e13dc3b3"
+        ],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-8d7d45e274e454ac"
+        ],
+        "exclusion_reason_cn": "文章核心为土壤质量与肥力评价，属于土壤健康范畴，与画像方向不符。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1038/s43247-026-03974-2",
+      "title": "Redox-driven dissolution of bulk cadmium sulfide triggers in-root immobilization as cadmium–phosphate nanocrystals",
+      "journal": "Communications Earth & Environment",
+      "expected_group": "boundary",
+      "reference_note": "稻田重金属机制，当前存在heavy metal排除",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“soil organic carbon mapping”直接相关",
+      "new": {
+        "id": "10.1038/s43247-026-03974-2",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "文章研究镉硫化物在淹水稻田中的转化及植物吸收，属于重金属污染与植物修复领域，与土壤有机碳制图、数字土壤制图等画像方向无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Redox-driven dissolution of bulk cadmium sulfide triggers in-root immobilization as cadmium–phosphate nanocrystals"
+        ],
+        "profile_refs": [],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-40e6f3039d5beea5"
+        ],
+        "exclusion_reason_cn": "文章主要研究重金属镉的行为，属于重金属排除范畴。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1016/j.ecolind.2026.115424",
+      "title": "Diagnosing ecological risks under current land-use configurations in Inner Mongolia",
+      "journal": "Ecological Indicators",
+      "expected_group": "boundary",
+      "reference_note": "土地利用与生态风险，是否过泛",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“cropland conversion”直接相关",
+      "new": {
+        "id": "10.1016/j.ecolind.2026.115424",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 15,
+        "relation": "unrelated",
+        "reason_cn": "文章主要研究生态风险诊断与生态系统服务评估，虽涉及土地利用，但未涉及土壤有机碳或数字土壤制图，且土壤健康为排除词，主要问题非SOC。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Diagnosing ecological risks under current land-use configurations in Inner Mongolia",
+          "integrating ecosystem service assessment and evaluation of land-use alignment with natural conditions"
+        ],
+        "profile_refs": [
+          "term:term-679c1794f6625979"
+        ],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-8d7d45e274e454ac"
+        ],
+        "exclusion_reason_cn": "文章核心为生态风险与生态系统服务，属于土壤健康与土地管理范畴，与画像方向不符。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1007/s00374-026-02050-3",
+      "title": "Differential responses of soil bacterial community and respiration to plastic film and straw mulching in a maize field",
+      "journal": "Biology and Fertility of Soils",
+      "expected_group": "boundary",
+      "reference_note": "土壤细菌主题与微生物排除边界",
+      "old_score": 80,
+      "old_status": "new",
+      "old_reason": "与核心关键词“cropland conversion”直接相关",
+      "new": {
+        "id": "10.1007/s00374-026-02050-3",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 0,
+        "relation": "unrelated",
+        "reason_cn": "论文主要研究土壤细菌群落和呼吸对地膜和秸秆覆盖的响应，属于微生物和田间试验领域，与数字土壤制图、土壤有机碳制图等画像方向无直接或可迁移联系。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Differential responses of soil bacterial community and respiration to plastic film and straw mulching in a maize field"
+        ],
+        "profile_refs": [],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-cd191df6c0ac30a6",
+          "exclude:term-d9c83409b95c0b02",
+          "exclude:term-c84a35995c4a1ba8"
+        ],
+        "exclusion_reason_cn": "标题明确涉及土壤细菌群落（微生物）和秸秆覆盖（秸秆还田），且为田间试验，均属排除主题。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.34133/ehs.0559",
+      "title": "Soil Carbon Loss Driven by Soil Erosion: Progress, Challenges, and Future Directions",
+      "journal": "Ecosystem Health and Sustainability",
+      "expected_group": "boundary",
+      "reference_note": "侵蚀土壤碳综述与erodibility排除边界",
+      "old_score": 85,
+      "old_status": "new",
+      "old_reason": "与核心关键词“soil organic carbon mapping”直接相关",
+      "new": {
+        "id": "10.34133/ehs.0559",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 20,
+        "relation": "unrelated",
+        "reason_cn": "论文是土壤侵蚀驱动碳损失的综述，虽涉及土壤有机碳，但主要研究问题是侵蚀过程与碳循环，而非数字土壤制图或土壤有机碳空间预测。未提供可迁移到画像研究的具体方法或结论，相关性低。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Soil-erosion-driven loss of soil organic carbon is a critical component of the global carbon cycle and climate change research.",
+          "Current focuses include precise quantification of carbon source or sink effects within the erosion–deposition continuum."
+        ],
+        "profile_refs": [
+          "term:term-7604057665ff89e2",
+          "term:term-8d1509634de0c331",
+          "term:term-10b116b5839eecc9"
+        ],
+        "exclusion": "none",
+        "exclusion_refs": [],
+        "exclusion_reason_cn": "",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1016/j.jenvman.2026.130845",
+      "title": "Defining soil geochemical domains for terroir microzonation and sustainable, climate-resilient vineyard management",
+      "journal": "Journal of Environmental Management",
+      "expected_group": "boundary",
+      "reference_note": "葡萄园地球化学分区，与用户已忽略记录对照",
+      "old_score": 65,
+      "old_status": "dismissed",
+      "old_reason": "与核心关键词“soil organic carbon mapping”直接相关",
+      "new": {
+        "id": "10.1016/j.jenvman.2026.130845",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 10,
+        "relation": "unrelated",
+        "reason_cn": "论文主要研究葡萄园土壤地球化学分区和土壤质量指数，用于terroir微分区和葡萄园管理，与数字土壤制图、土壤有机碳制图等画像方向无关，且涉及土壤健康等排除主题。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "This study introduces a reproducible workflow that delineates soil geochemical domains from pre-existing geochemical data and links them to soil quality, turning a static database into an actionable tool for site-specific vineyard management in the Taurasi terroir (southern Italy), renowned for its high-quality wines."
+        ],
+        "profile_refs": [],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-8d7d45e274e454ac"
+        ],
+        "exclusion_reason_cn": "论文核心是土壤质量指数（SQI）评估，属于土壤健康范畴。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1016/j.catena.2026.110483",
+      "title": "Soil organic carbon patterns and carbon‑iron binding at different slope positions on eroded slopes in subalpine regions",
+      "journal": "CATENA",
+      "expected_group": "boundary",
+      "reference_note": "土壤碳铁结合与mineral排除冲突",
+      "old_score": 180,
+      "old_status": "read",
+      "old_reason": "标题/摘要回退：关键词得分 80 分：一级“土壤有机碳”；二级“土壤有机碳”",
+      "new": {
+        "id": "10.1016/j.catena.2026.110483",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 30,
+        "relation": "unrelated",
+        "reason_cn": "标题表明论文研究亚高山侵蚀坡地不同坡位的土壤有机碳格局及碳-铁结合，涉及土壤有机碳但主要关注侵蚀和碳-铁结合机制，与数字土壤制图或空间预测无直接联系，且涉及矿物结合（碳-铁结合）可能触发排除词。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Soil organic carbon patterns and carbon‑iron binding at different slope positions on eroded slopes in subalpine regions"
+        ],
+        "profile_refs": [
+          "term:term-7604057665ff89e2"
+        ],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-558d9ebff7a15b16"
+        ],
+        "exclusion_reason_cn": "标题明确提及碳-铁结合，属于矿物相关主题。",
+        "policy_version": "offline-admission-1"
+      }
+    },
+    {
+      "id": "10.1007/s11104-026-08878-w",
+      "title": "Straw return combined with controlled-release urea enhances wheat yield and soil fertility by regulating soil organic carbon fractions: a 10-year field experiment",
+      "journal": "Plant and Soil",
+      "expected_group": "boundary",
+      "reference_note": "SOC组分相关但主要是秸秆还田田间试验",
+      "old_score": 110,
+      "old_status": "read",
+      "old_reason": "标题/摘要回退：关键词得分 80 分：一级“土壤有机碳”；二级“土壤有机碳”",
+      "new": {
+        "id": "10.1007/s11104-026-08878-w",
+        "content_decision": "reject",
+        "route": "rejected",
+        "score": 20,
+        "relation": "unrelated",
+        "reason_cn": "论文研究秸秆还田和控释尿素对小麦产量和土壤肥力的影响，通过调节土壤有机碳组分，属于田间试验和秸秆还田主题，与数字土壤制图、土壤有机碳空间预测等画像方向无关。",
+        "validation_issue": "",
+        "evidence_quotes": [
+          "Straw return combined with controlled-release urea enhances wheat yield and soil fertility by regulating soil organic carbon fractions: a 10-year field experiment"
+        ],
+        "profile_refs": [
+          "term:term-7604057665ff89e2"
+        ],
+        "exclusion": "primary",
+        "exclusion_refs": [
+          "exclude:term-d9c83409b95c0b02",
+          "exclude:term-c84a35995c4a1ba8"
+        ],
+        "exclusion_reason_cn": "标题明确包含秸秆还田和田间试验，均属排除主题。",
+        "policy_version": "offline-admission-1"
+      }
+    }
+  ],
+  "formal_data_unchanged": true,
+  "hashed_files": 16,
+  "cache_hits": 0,
+  "remote_calls": 8,
+  "ai_model": "deepseek-v4-flash",
+  "easyscholar_live_requests": 0
+}

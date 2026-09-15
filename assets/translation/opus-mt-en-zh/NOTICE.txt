@@ -1,0 +1,12 @@
+Bundled offline translation model
+
+Model: Helsinki-NLP/opus-mt-en-zh
+Source: https://huggingface.co/Helsinki-NLP/opus-mt-en-zh
+Framework: OPUS-MT / Marian, converted to CTranslate2 int8 format
+License: Apache License 2.0 (as declared by the model repository)
+
+Runtime components:
+- CTranslate2: MIT License
+- SentencePiece: Apache License 2.0
+
+The model runs locally. Text sent to this translator does not leave the computer.

@@ -1,0 +1,46 @@
+{
+  "before": {
+    "achievement_pdf_cache.json": "b58ba3e889b71d9daf4004bd7c125cdf556e78415f773a2d02dee8c1a59f9585",
+    "achievements.json": "f338687a84b5129d9235233686a4c2ff6b6f79852d4911533dce66c4b249080a",
+    "frontier.json": "57c03318490916386c8f99b9b2a43ace943787624db4bffd2d2b957b41313572",
+    "inspiration.json": "46171377020f33e5935c6d6ccf9ea2fe00fce792cce49cc902ebd4c288bb46c0",
+    "journals.json": "1cd4d7fe9bf0365b2474ab4f8349c28704d06312dae0f51be78070b048518083",
+    "papers.json": "621dd14389f49db44f43736a149dc34881ee447e4fd1ee2148d58d0bf2bf1d13",
+    "readings.json": "35950c83039c7871013d649aeb94dbebeea4a3892a926a1e4e5c57a0f0700545",
+    "rejection_archive.json": "d6358255a1c18318b4993314fc50aa6af134edb23ceaf3a60624510f748035ef",
+    "reminders.json": "85f43a031dcd0ae06ee1703f9e7662b4c7537fef0ca1c6a7e517d24da809980e",
+    "research_intelligence.sqlite": "13f6d875f689f2bcd51298a4b8da7324abe2900a4aed1102117bd1d1de2f3967",
+    "research_profile.json": "e14b4c2ccffa7f29333cb313712b965cb9bab3f3b0f713bbc9de7b43b659f584",
+    "selection_feedback.json": "3a491aa779a49b87371dcab9875a4e7b762e12881449b3c355dae82968623acf",
+    "settings.json": "19eafff1772589c2dbdc383207e24bfd8a414ce49e9eb9d947191173c0ae5c78",
+    "special_issues.json": "0e18b6f5e9039160d29cda1f001cc9c35c09c3b61a7b18c5ce8fd4621cde6a49",
+    "todo.json": "46fe9b5ab4fe91089c7823ff00fa702e688f49263189f4813c8aed5da8e8a732",
+    "todo_meta.json": "1c73112e92701cfc6ec353bd9ff8c0cbceec257e3407651207c8a020485ba55f"
+  },
+  "after": {
+    "achievement_pdf_cache.json": "b58ba3e889b71d9daf4004bd7c125cdf556e78415f773a2d02dee8c1a59f9585",
+    "achievements.json": "f338687a84b5129d9235233686a4c2ff6b6f79852d4911533dce66c4b249080a",
+    "frontier.json": "57c03318490916386c8f99b9b2a43ace943787624db4bffd2d2b957b41313572",
+    "inspiration.json": "46171377020f33e5935c6d6ccf9ea2fe00fce792cce49cc902ebd4c288bb46c0",
+    "journals.json": "1cd4d7fe9bf0365b2474ab4f8349c28704d06312dae0f51be78070b048518083",
+    "papers.json": "621dd14389f49db44f43736a149dc34881ee447e4fd1ee2148d58d0bf2bf1d13",
+    "readings.json": "35950c83039c7871013d649aeb94dbebeea4a3892a926a1e4e5c57a0f0700545",
+    "rejection_archive.json": "d6358255a1c18318b4993314fc50aa6af134edb23ceaf3a60624510f748035ef",
+    "reminders.json": "85f43a031dcd0ae06ee1703f9e7662b4c7537fef0ca1c6a7e517d24da809980e",
+    "research_intelligence.sqlite": "13f6d875f689f2bcd51298a4b8da7324abe2900a4aed1102117bd1d1de2f3967",
+    "research_profile.json": "e14b4c2ccffa7f29333cb313712b965cb9bab3f3b0f713bbc9de7b43b659f584",
+    "selection_feedback.json": "3a491aa779a49b87371dcab9875a4e7b762e12881449b3c355dae82968623acf",
+    "settings.json": "19eafff1772589c2dbdc383207e24bfd8a414ce49e9eb9d947191173c0ae5c78",
+    "special_issues.json": "0e18b6f5e9039160d29cda1f001cc9c35c09c3b61a7b18c5ce8fd4621cde6a49",
+    "todo.json": "46fe9b5ab4fe91089c7823ff00fa702e688f49263189f4813c8aed5da8e8a732",
+    "todo_meta.json": "1c73112e92701cfc6ec353bd9ff8c0cbceec257e3407651207c8a020485ba55f"
+  },
+  "unchanged": true,
+  "snapshot_source_unchanged": true,
+  "mode": "replay",
+  "generated_at": "2026-09-05T16:59:27",
+  "implementation_sha256": {
+    "frontier_admission.py": "c16cd6f6d6dc41c7f211825796846f85de4c9c10513776b0dc84cfead3bbe7c9",
+    "offline_frontier_review.py": "2a9e1d605e5d89ea442df4593dd03f6b58e15dc851fb9a866a01dd55cc74f518"
+  }
+}

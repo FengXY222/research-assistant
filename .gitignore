@@ -1,0 +1,40 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.build-venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated build and release artifacts
+.build/
+build/
+dist/
+发布/
+*.exe
+*.msi
+*.log
+
+# Personal and test data
+data/
+.qa-user-data/
+.test-data/
+.test-results/
+tmp/
+docs/qa/
+
+# Local agent and workspace state
+.mimosa/
+.superpowers/
+.workspaces/
+
+# Editors and Windows metadata
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
