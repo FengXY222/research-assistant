@@ -70,6 +70,16 @@ class V131UiRefreshTests(TestCase):
 
         self.assertEqual([button.text() for button in window._nav_buttons], ["概览", "工作", "论文", "文献"])
         self.assertTrue(all(not button.icon().isNull() for button in window._nav_buttons))
+        self.assertEqual(len(window.findChildren(PageHeader)), 1)
+        _ = (
+            window.todo_page,
+            window.paper_page,
+            window.notes_page,
+            window.journal_page,
+            window.frontier_page,
+            window.special_issue_page,
+            window.achievements_page,
+        )
         self.assertGreaterEqual(len(window.findChildren(PageHeader)), 8)
         frontier_actions = [action.text() for action in window.frontier_page.more_actions_button.menu().actions()]
         self.assertNotIn("切换列表", frontier_actions)

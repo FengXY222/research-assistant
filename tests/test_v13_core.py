@@ -62,7 +62,7 @@ def _profile() -> dict:
 
 
 def test_release_and_six_source_six_lane_contract() -> None:
-    assert APP_VERSION == "13.1.2"
+    assert APP_VERSION == "13.1.3"
     core = {key for key, value in SOURCE_REGISTRY.items() if value.get("group") == "frontier_core"}
     assert core == {"openalex", "crossref", "semantic_scholar", "europe_pmc", "doaj", "arxiv"}
     assert set(RECALL_STRATEGIES) == {

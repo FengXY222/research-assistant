@@ -66,6 +66,7 @@ class WorkbenchShell(QWidget):
         self._host: QWidget | None = None
         self._primary_stack: QStackedWidget | None = None
         self._inner_stacks: dict[str, tuple[QStackedWidget, dict[str, int]]] = {}
+        self._page_slots: dict[str, tuple[QStackedWidget, int]] = {}
         self._software_scroll = None  # Compatibility sentinel for v11 diagnostics.
         self._current = resolve_route("home")
         self._layout = QVBoxLayout(self)
@@ -107,6 +108,7 @@ class WorkbenchShell(QWidget):
         self._host = None
         self._primary_stack = None
         self._inner_stacks = {}
+        self._page_slots = {}
         self._software_scroll = None
 
     def _build_widget_shell(self) -> None:
@@ -117,7 +119,8 @@ class WorkbenchShell(QWidget):
         root.setSpacing(0)
         stack = QStackedWidget()
         stack.setObjectName("workbenchPrimaryStack")
-        stack.addWidget(self.pages["home"])
+        home_index = stack.addWidget(self.pages["home"])
+        self._page_slots["home"] = (stack, home_index)
         for workbench in ("work", "papers", "library"):
             stack.addWidget(self._make_widget_panel(workbench))
         root.addWidget(stack, 1)
@@ -155,6 +158,7 @@ class WorkbenchShell(QWidget):
             page = self.pages[page_key]
             index = inner.addWidget(page)
             anchors[anchor] = index
+            self._page_slots[page_key] = (inner, index)
             chip = QPushButton(label)
             chip.setObjectName("workbenchChip")
             chip.setCheckable(True)
@@ -187,3 +191,22 @@ class WorkbenchShell(QWidget):
                 animate_widget_enter(self._primary_stack.currentWidget(), distance=3, duration_ms=150)
         self.route_changed.emit(target.workbench, target.anchor)
         return target
+
+    def replace_page(self, page_key: str, page: QWidget) -> None:
+        """Replace a lightweight placeholder without rebuilding the shell."""
+
+        old_page = self.pages.get(page_key)
+        self.pages[page_key] = page
+        slot = self._page_slots.get(page_key)
+        if slot is None:
+            return
+        stack, index = slot
+        was_current = stack.currentWidget() is old_page
+        if old_page is not None:
+            stack.removeWidget(old_page)
+            old_page.setParent(None)
+            old_page.deleteLater()
+        inserted_index = stack.insertWidget(index, page)
+        self._page_slots[page_key] = (stack, inserted_index)
+        if was_current:
+            stack.setCurrentWidget(page)

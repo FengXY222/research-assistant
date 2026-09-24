@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $appName = ([char]0x79d1).ToString() + [char]0x7814 + [char]0x52a9 + [char]0x624b
-$appVersion = "13.1.2"
+$appVersion = "13.1.3"
 $issFile = Join-Path $PSScriptRoot ($appName + ".iss")
 $buildEnvironment = Join-Path $PSScriptRoot ".build-venv"
 $pythonPath = Join-Path $buildEnvironment "Scripts\python.exe"
@@ -78,6 +78,13 @@ try {
         "--hidden-import", "pypdfium2",
         "--hidden-import", "ctranslate2",
         "--hidden-import", "sentencepiece",
+        "--hidden-import", "ui.todo_page",
+        "--hidden-import", "ui.paper_page",
+        "--hidden-import", "ui.notes_page",
+        "--hidden-import", "ui.journal_library_page",
+        "--hidden-import", "ui.frontier_page",
+        "--hidden-import", "ui.special_issue_page",
+        "--hidden-import", "ui.achievements_page",
         "--collect-data", "rapidocr",
         "--collect-binaries", "ctranslate2"
     )

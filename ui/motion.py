@@ -68,15 +68,17 @@ def animate_widget_enter(
     setattr(widget, "_v12_enter_animation", group)
 
     def cleanup() -> None:
-        widget.move(target)
-        current = getattr(widget, "_v12_enter_animation", None)
-        if current is group:
-            setattr(widget, "_v12_enter_animation", None)
         try:
+            widget.move(target)
+            current = getattr(widget, "_v12_enter_animation", None)
+            if current is group:
+                setattr(widget, "_v12_enter_animation", None)
             if widget.graphicsEffect() is effect:
                 widget.setGraphicsEffect(None)
         except RuntimeError:
-            pass
+            # Lazy page replacement may retire the placeholder before its
+            # restrained entrance animation posts this cleanup callback.
+            return
 
     group.finished.connect(lambda: QTimer.singleShot(0, cleanup))
     group.start()

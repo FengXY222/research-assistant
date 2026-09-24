@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import ctypes
+import importlib
 import os
 import sys
+from collections.abc import Callable
 from datetime import date, timedelta
 from uuid import uuid4
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QParallelAnimationGroup, QPropertyAnimation, Property, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QParallelAnimationGroup, QPropertyAnimation, Property, QRect, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QCursor, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,21 +29,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ui.paper_page import PaperDialog, PaperPage
-from ui.journal_library_page import JournalLibraryPage
-from ui.todo_page import TodoPage
 from ui.home_page import HomePage
-from ui.frontier_page import DailyFrontierPage
-from ui.special_issue_page import SpecialIssuePage
-from ui.special_issue_dialog import SpecialIssueDialog
-from ui.achievements_page import AchievementsPage
-from ui.notes_page import NotesPage
-from ui.reminder_dialog import ReadySubmissionDialog, SubmissionReminderDialog
-from ui.settings_center import SettingsCenterDialog
 from ui.icons import lucide_icon
-from ui.quick_capture_dialog import QuickCaptureDialog
 from ui.theme import apply_application_theme
-from ui.workbench_shell import WorkbenchShell
+from ui.workbench_shell import WorkbenchShell, resolve_route
 from utils.app_info import APP_VERSION
 from utils.global_hotkey import GlobalHotkeyManager, VK_SPACE
 from utils.file_manager import (
@@ -54,7 +45,6 @@ from utils.file_manager import (
     save_dismissed_reminders,
     save_papers,
     save_reminder_state,
-    sync_journal_library_from_papers,
 )
 from utils.submission_reminders import due_ready_submission_reminders, due_submission_reminders
 from utils.special_issue_repository import (
@@ -132,6 +122,72 @@ LEGACY_PAGE_ROUTES = {
     6: "achievements",
 }
 
+LAZY_PAGE_TYPES = {
+    "todo": ("ui.todo_page", "TodoPage"),
+    "papers": ("ui.paper_page", "PaperPage"),
+    "notes": ("ui.notes_page", "NotesPage"),
+    "journals": ("ui.journal_library_page", "JournalLibraryPage"),
+    "frontier": ("ui.frontier_page", "DailyFrontierPage"),
+    "special_issues": ("ui.special_issue_page", "SpecialIssuePage"),
+    "achievements": ("ui.achievements_page", "AchievementsPage"),
+}
+
+
+class LazyPagePlaceholder(QWidget):
+    """Responsive stand-in while a page module is imported in the background."""
+
+    def __init__(self, label: str) -> None:
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.addStretch(1)
+        self.message = QLabel(f"正在准备{label}…")
+        self.message.setObjectName("settingsHint")
+        self.message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.message)
+        layout.addStretch(1)
+
+    def show_error(self, message: str) -> None:
+        self.message.setText(f"暂时无法打开：{message}")
+
+
+class PageImportThread(QThread):
+    """Import one optional page module away from the GUI event loop."""
+
+    ready = Signal(str, object)
+    failed = Signal(str, str)
+
+    def __init__(self, page_key: str, module_name: str, class_name: str) -> None:
+        super().__init__()
+        self.page_key = page_key
+        self.module_name = module_name
+        self.class_name = class_name
+
+    def run(self) -> None:
+        try:
+            module = importlib.import_module(self.module_name)
+            self.ready.emit(self.page_key, getattr(module, self.class_name))
+        except Exception as error:  # noqa: BLE001 - surface optional page failures in-place
+            self.failed.emit(self.page_key, str(error))
+
+
+class IdleBackupThread(QThread):
+    """Create the due snapshot without occupying the GUI thread."""
+
+    completed = Signal()
+    failed = Signal(str)
+
+    def __init__(self, settings: dict) -> None:
+        super().__init__()
+        self.settings = dict(settings)
+
+    def run(self) -> None:
+        try:
+            maybe_create_daily_backup(self.settings)
+            self.completed.emit()
+        except Exception as error:  # noqa: BLE001 - backup failures must not close the app
+            self.failed.emit(str(error))
+
 
 class VerticalNavButton(QPushButton):
     """Compatibility name for the v13.1 horizontal icon-and-Chinese nav."""
@@ -200,11 +256,13 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.settings = load_app_settings()
-        try:
-            maybe_create_daily_backup(self.settings)
-        except OSError:
-            pass
-        sync_journal_library_from_papers(load_papers())
+        self._loaded_pages: dict[str, QWidget] = {}
+        self._page_placeholders: dict[str, LazyPagePlaceholder] = {}
+        self._page_loaders: dict[str, PageImportThread] = {}
+        self._page_ready_callbacks: dict[str, list[Callable[[], None]]] = {}
+        self._backup_thread: IdleBackupThread | None = None
+        self._idle_tasks_running = False
+        self._idle_task_queue: list[tuple[str, str]] = []
         self.application_mode = normalize_application_mode(self.settings.get("application_mode", "widget"))
         self.widget_locked = bool(self.settings["window"]["locked"])
         self.setWindowTitle("科研助手")
@@ -239,6 +297,10 @@ class MainWindow(QMainWindow):
         self._home_idle_timer.setSingleShot(True)
         self._home_idle_timer.setInterval(60 * 1000)
         self._home_idle_timer.timeout.connect(self._return_home_after_idle)
+        self._maintenance_idle_timer = QTimer(self)
+        self._maintenance_idle_timer.setSingleShot(True)
+        self._maintenance_idle_timer.setInterval(2 * 60 * 1000)
+        self._maintenance_idle_timer.timeout.connect(self._run_idle_maintenance)
         self._hide_to_tray_queued = False
         self._exit_requested = False
         self._dirty_pages: set[str] = set()
@@ -270,6 +332,7 @@ class MainWindow(QMainWindow):
         self._start_frontier_checks()
         self._start_special_issue_checks()
         QApplication.instance().installEventFilter(self)
+        self._schedule_idle_maintenance()
         QTimer.singleShot(0, self._run_initial_navigation_state)
 
     def _build_ui(self) -> None:
@@ -371,24 +434,20 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(topbar)
 
         self.home_page = HomePage()
-        self.todo_page = TodoPage()
-        self.paper_page = PaperPage()
-        self.notes_page = NotesPage()
-        self.journal_page = JournalLibraryPage()
-        self.frontier_page = DailyFrontierPage()
-        self.special_issue_page = SpecialIssuePage()
-        self.achievements_page = AchievementsPage()
+        self._loaded_pages["home"] = self.home_page
+        labels = {
+            "todo": "今日任务",
+            "papers": "投稿记录",
+            "notes": "灵感与待读",
+            "journals": "期刊库",
+            "frontier": "每日前沿",
+            "special_issues": "特刊征稿",
+            "achievements": "成果",
+        }
+        for page_key, label in labels.items():
+            self._page_placeholders[page_key] = LazyPagePlaceholder(label)
         self.workbench_shell = WorkbenchShell(
-            {
-                "home": self.home_page,
-                "todo": self.todo_page,
-                "papers": self.paper_page,
-                "notes": self.notes_page,
-                "journals": self.journal_page,
-                "frontier": self.frontier_page,
-                "special_issues": self.special_issue_page,
-                "achievements": self.achievements_page,
-            }
+            {"home": self.home_page, **self._page_placeholders}
         )
         self.workbench_shell.setObjectName("contentStack")
         self.workbench_shell.set_mode(self.application_mode)
@@ -397,21 +456,6 @@ class MainWindow(QMainWindow):
         self.home_page.open_paper_journal.connect(self._reveal_home_paper_journal)
         self.home_page.open_notes.connect(lambda: self.navigate("notes"))
         self.home_page.open_frontier.connect(lambda: self.navigate("frontier"))
-        self.todo_page.changed.connect(self.home_page.refresh)
-        self.paper_page.changed.connect(self._on_paper_data_changed)
-        self.notes_page.changed.connect(self.home_page.refresh)
-        self.journal_page.changed.connect(self._on_journal_data_changed)
-        self.frontier_page.changed.connect(self.home_page.refresh)
-        self.achievements_page.changed.connect(self.home_page.refresh)
-        self.achievements_page.profile_update_requested.connect(self._update_profile_from_achievements)
-        self.frontier_page.daily_ready.connect(self._show_frontier_notification)
-        self.frontier_page.open_journal_library.connect(lambda: self.navigate("journals"))
-        self.frontier_page.settings_center_requested.connect(self._open_settings)
-        self.journal_page.settings_center_requested.connect(self._open_settings)
-        self.special_issue_page.open_workbench.connect(self._open_special_issue_workbench)
-        self.special_issue_page.refresh_progress.connect(self._show_special_issue_progress)
-        self.special_issue_page.refresh_completed.connect(self._special_issue_refresh_completed)
-        self.special_issue_page.refresh_failed.connect(self._special_issue_refresh_failed)
         content_layout.addWidget(self.workbench_shell, 1)
         self.shell_layout.addWidget(self.content_panel, 1)
         self.navigate("home")
@@ -426,12 +470,212 @@ class MainWindow(QMainWindow):
         self._nav_buttons.append(button)
         return button
 
+    @property
+    def todo_page(self):
+        return self._ensure_page_sync("todo")
+
+    @property
+    def paper_page(self):
+        return self._ensure_page_sync("papers")
+
+    @property
+    def notes_page(self):
+        return self._ensure_page_sync("notes")
+
+    @property
+    def journal_page(self):
+        return self._ensure_page_sync("journals")
+
+    @property
+    def frontier_page(self):
+        return self._ensure_page_sync("frontier")
+
+    @property
+    def special_issue_page(self):
+        return self._ensure_page_sync("special_issues")
+
+    @property
+    def achievements_page(self):
+        return self._ensure_page_sync("achievements")
+
+    def _ensure_page_sync(self, page_key: str) -> QWidget:
+        """Compatibility path for direct callers; navigation uses async import."""
+
+        existing = self._loaded_pages.get(page_key)
+        if existing is not None:
+            return existing
+        module_name, class_name = LAZY_PAGE_TYPES[page_key]
+        page_type = getattr(importlib.import_module(module_name), class_name)
+        return self._install_loaded_page(page_key, page_type)
+
+    def _ensure_page_async(self, page_key: str, callback: Callable[[], None] | None = None) -> None:
+        if page_key in self._loaded_pages:
+            if callback is not None:
+                QTimer.singleShot(0, callback)
+            return
+        if callback is not None:
+            self._page_ready_callbacks.setdefault(page_key, []).append(callback)
+        if page_key in self._page_loaders:
+            return
+        module_name, class_name = LAZY_PAGE_TYPES[page_key]
+        loader = PageImportThread(page_key, module_name, class_name)
+        loader.setParent(self)
+        loader.ready.connect(self._page_import_ready)
+        loader.failed.connect(self._page_import_failed)
+        loader.finished.connect(loader.deleteLater)
+        self._page_loaders[page_key] = loader
+        loader.start(QThread.Priority.LowPriority)
+
+    def _page_import_ready(self, page_key: str, page_type: object) -> None:
+        self._page_loaders.pop(page_key, None)
+        try:
+            self._install_loaded_page(page_key, page_type)
+        except Exception as error:  # noqa: BLE001 - keep the rest of the shell usable
+            self._page_import_failed(page_key, str(error))
+            return
+        callbacks = self._page_ready_callbacks.pop(page_key, [])
+        for callback in callbacks:
+            QTimer.singleShot(0, callback)
+
+    def _page_import_failed(self, page_key: str, message: str) -> None:
+        self._page_loaders.pop(page_key, None)
+        self._page_ready_callbacks.pop(page_key, None)
+        placeholder = self._page_placeholders.get(page_key)
+        if placeholder is not None:
+            try:
+                placeholder.show_error(message or "页面加载失败")
+            except RuntimeError:
+                pass
+        if self._idle_tasks_running:
+            QTimer.singleShot(0, self._run_next_idle_task)
+
+    def _install_loaded_page(self, page_key: str, page_type: object) -> QWidget:
+        existing = self._loaded_pages.get(page_key)
+        if existing is not None:
+            return existing
+        page = page_type()
+        self._loaded_pages[page_key] = page
+        self._connect_loaded_page(page_key, page)
+        self.workbench_shell.replace_page(page_key, page)
+        self._page_placeholders.pop(page_key, None)
+        return page
+
+    def _connect_loaded_page(self, page_key: str, page: QWidget) -> None:
+        if page_key in {"todo", "notes", "frontier", "achievements"}:
+            page.changed.connect(self.home_page.refresh)
+        if page_key == "papers":
+            page.changed.connect(self._on_paper_data_changed)
+        elif page_key == "journals":
+            page.changed.connect(self._on_journal_data_changed)
+            page.settings_center_requested.connect(self._open_settings)
+        elif page_key == "frontier":
+            page.daily_ready.connect(self._show_frontier_notification)
+            page.open_journal_library.connect(lambda: self.navigate("journals"))
+            page.settings_center_requested.connect(self._open_settings)
+        elif page_key == "achievements":
+            page.profile_update_requested.connect(self._update_profile_from_achievements)
+        elif page_key == "special_issues":
+            page.open_workbench.connect(self._open_special_issue_workbench)
+            page.refresh_progress.connect(self._show_special_issue_progress)
+            page.refresh_completed.connect(self._special_issue_refresh_completed)
+            page.refresh_failed.connect(self._special_issue_refresh_failed)
+
     def _run_initial_navigation_state(self) -> None:
         """Drop a queued startup layout pass when the window has closed."""
         try:
             self._apply_initial_navigation_state()
         except RuntimeError:
             return
+
+    def _schedule_idle_maintenance(self, delay_ms: int | None = None) -> None:
+        """Postpone disk/network maintenance until the app is not being used."""
+
+        if os.environ.get("RESEARCH_ASSISTANT_DISABLE_BACKGROUND") == "1":
+            return
+        delay = 2 * 60 * 1000 if delay_ms is None else max(1000, int(delay_ms))
+        self._maintenance_idle_timer.start(delay)
+
+    def _application_is_in_use(self) -> bool:
+        app = QApplication.instance()
+        return bool(
+            app is not None
+            and app.applicationState() == Qt.ApplicationState.ApplicationActive
+            and self.isVisible()
+            and not self.isMinimized()
+        )
+
+    def _run_idle_maintenance(self) -> None:
+        if self._application_is_in_use() or QApplication.activeModalWidget() is not None:
+            self._schedule_idle_maintenance(30 * 1000)
+            return
+        if self._backup_thread is not None and self._backup_thread.isRunning():
+            self._schedule_idle_maintenance(60 * 1000)
+            return
+        if self.settings.get("auto_backup", False):
+            thread = IdleBackupThread(self.settings)
+            thread.setParent(self)
+            thread.completed.connect(self._run_idle_soft_tasks)
+            thread.failed.connect(lambda _message: self._run_idle_soft_tasks())
+            thread.finished.connect(thread.deleteLater)
+            thread.finished.connect(self._clear_backup_thread)
+            self._backup_thread = thread
+            thread.start(QThread.Priority.LowPriority)
+            return
+        self._run_idle_soft_tasks()
+
+    def _clear_backup_thread(self) -> None:
+        self._backup_thread = None
+
+    def _run_idle_soft_tasks(self) -> None:
+        if self._idle_tasks_running:
+            return
+        self._idle_tasks_running = True
+        self._idle_task_queue = [
+            ("frontier", "profile"),
+            ("journals", "enrich"),
+            ("special_issues", "refresh"),
+        ]
+        if self.settings.get("frontier_background_refresh", True):
+            self._idle_task_queue.insert(1, ("frontier", "refresh"))
+        self._run_next_idle_task()
+
+    def _run_next_idle_task(self) -> None:
+        if self._application_is_in_use() or QApplication.activeModalWidget() is not None:
+            self._idle_task_queue.clear()
+            self._idle_tasks_running = False
+            self._schedule_idle_maintenance(30 * 1000)
+            return
+        if not self._idle_task_queue:
+            self._idle_tasks_running = False
+            self._schedule_idle_maintenance(60 * 60 * 1000)
+            return
+        page_key, action = self._idle_task_queue.pop(0)
+
+        def run_action() -> None:
+            if self._application_is_in_use():
+                self._idle_task_queue.clear()
+                self._idle_tasks_running = False
+                self._schedule_idle_maintenance(30 * 1000)
+                return
+            page = self._loaded_pages.get(page_key)
+            try:
+                if page_key == "frontier" and action == "profile":
+                    page.auto_update_profile_if_due(
+                        refresh_after=bool(self.settings.get("frontier_background_refresh", True))
+                    )
+                elif page_key == "frontier":
+                    page.auto_refresh_if_due()
+                elif page_key == "journals":
+                    page.auto_update_easyscholar_if_due()
+                    page.auto_enrich_new_if_due()
+                    self.settings = load_app_settings()
+                elif page_key == "special_issues":
+                    page.auto_refresh_if_due()
+            except (AttributeError, RuntimeError):
+                pass
+            QTimer.singleShot(1500, self._run_next_idle_task)
+
+        self._ensure_page_async(page_key, run_action)
 
     def _apply_initial_navigation_state(self) -> None:
         self._set_sidebar_position(self.settings.get("sidebar_position", "left"), persist=False)
@@ -493,7 +737,7 @@ class MainWindow(QMainWindow):
     def navigate(self, route: str, anchor: str | None = None) -> None:
         """Navigate legacy callers and new workbench controls through one registry."""
         self._expand_main_content()
-        target = self.workbench_shell.navigate(route, anchor)
+        requested = resolve_route(route, anchor)
         page_key = {
             ("work", "tasks"): "todo",
             ("work", "notes"): "notes",
@@ -502,17 +746,19 @@ class MainWindow(QMainWindow):
             ("library", "journals"): "journals",
             ("library", "frontier"): "frontier",
             ("library", "special_issues"): "special_issues",
-        }.get((target.workbench, target.anchor))
+        }.get((requested.workbench, requested.anchor))
+        target = self.workbench_shell.navigate(requested)
+        if page_key is not None and page_key not in self._loaded_pages:
+            self._ensure_page_async(
+                page_key,
+                lambda selected=requested: self.navigate(selected.workbench, selected.anchor),
+            )
+            for button in self._nav_buttons:
+                button.setChecked(button.page_index == target.workbench)
+            self._home_idle_timer.start()
+            return
         if page_key in self._dirty_pages:
-            page = {
-                "todo": self.todo_page,
-                "notes": self.notes_page,
-                "papers": self.paper_page,
-                "achievements": self.achievements_page,
-                "journals": self.journal_page,
-                "frontier": self.frontier_page,
-                "special_issues": self.special_issue_page,
-            }[page_key]
+            page = self._loaded_pages[page_key]
             page.reload()
             self._dirty_pages.discard(page_key)
         for button in self._nav_buttons:
@@ -537,6 +783,8 @@ class MainWindow(QMainWindow):
 
     def _open_special_issue_workbench(self, selected_issue_id: str = "") -> None:
         """Open or focus the one large workbench without changing widget mode."""
+        from ui.special_issue_dialog import SpecialIssueDialog
+
         if selected_issue_id:
             try:
                 current_store = load_special_issue_overview()
@@ -724,8 +972,8 @@ class MainWindow(QMainWindow):
             dialog.finish_progress(f"刷新未完成：{message}")
 
     def _start_special_issue_checks(self) -> None:
-        # Run after the compact widget and tray have painted. The page itself
-        # owns the 24-hour boundary and prevents duplicate workers.
+        # The page owns the 24-hour boundary. MainWindow only asks for work
+        # after the user has left the application idle.
         if hasattr(self, "_special_issue_timer") and self._special_issue_timer is not None:
             self._special_issue_timer.stop()
         if os.environ.get("RESEARCH_ASSISTANT_DISABLE_BACKGROUND") == "1":
@@ -733,14 +981,16 @@ class MainWindow(QMainWindow):
             return
         self._special_issue_timer = QTimer(self)
         self._special_issue_timer.setInterval(60 * 60 * 1000)
-        self._special_issue_timer.timeout.connect(self.special_issue_page.auto_refresh_if_due)
+        self._special_issue_timer.timeout.connect(self._schedule_idle_maintenance)
         self._special_issue_timer.start()
-        QTimer.singleShot(12000, self.special_issue_page.auto_refresh_if_due)
 
     def _reveal_home_paper_journal(self, paper_id: str, journal_id: str) -> None:
         """Follow a HOME action directly to its owning journal history row."""
         self.navigate("papers")
-        QTimer.singleShot(0, lambda: self.paper_page.reveal_journal(paper_id, journal_id))
+        self._ensure_page_async(
+            "papers",
+            lambda: self._loaded_pages["papers"].reveal_journal(paper_id, journal_id),
+        )
 
     def _switch_page(self, index: int | str) -> None:
         """Compatibility adapter for existing reminder, tray and HOME call sites."""
@@ -967,6 +1217,8 @@ class MainWindow(QMainWindow):
         self.lock_button.setToolTip("窗口已固定，点击解除固定" if locked else "固定窗口位置和大小 / 解除固定")
 
     def _open_settings(self, section: str = "general") -> None:
+        from ui.settings_center import SettingsCenterDialog
+
         if isinstance(section, bool):
             section = "general"
         dialog = SettingsCenterDialog(
@@ -980,9 +1232,13 @@ class MainWindow(QMainWindow):
         dialog.backup_restored.connect(self._reload_local_data)
         dialog.data_location_changed.connect(self._reload_local_data)
         dialog.exec()
-        self.frontier_page.reload()
+        frontier_page = self._loaded_pages.get("frontier")
+        if frontier_page is not None:
+            frontier_page.reload()
 
     def _open_research_inbox(self) -> None:
+        from ui.quick_capture_dialog import QuickCaptureDialog
+
         dialog = QuickCaptureDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._reload_local_data()
@@ -1074,10 +1330,7 @@ class MainWindow(QMainWindow):
         if frontier_configuration_changed:
             self._start_frontier_checks()
         if self.settings["auto_backup"] and not bool(previous.get("auto_backup", False)):
-            try:
-                maybe_create_daily_backup(self.settings)
-            except OSError:
-                pass
+            self._schedule_idle_maintenance()
         if bool(previous.get("ready_submission_reminder", False)) != self.settings["ready_submission_reminder"]:
             self._check_submission_reminders()
 
@@ -1100,14 +1353,17 @@ class MainWindow(QMainWindow):
     def _open_global_journal_import(self) -> None:
         """Handle the Windows-wide hotkey even when another app had focus."""
         modal = QApplication.activeModalWidget()
-        if isinstance(modal, PaperDialog):
+        if modal is not None and modal.__class__.__name__ == "PaperDialog":
             # When already editing a paper, import straight into it rather
             # than opening a second chooser behind the dialog.
             modal._request_journal_import()
             return
         self.show_and_activate()
         self._switch_page(2)
-        QTimer.singleShot(160, self.paper_page.open_global_journal_import)
+        self._ensure_page_async(
+            "papers",
+            lambda: self._loaded_pages["papers"].open_global_journal_import(),
+        )
 
     def _apply_global_visibility_shortcut(self, notify: bool = False) -> None:
         status = self._visibility_hotkey.configure(self.settings.get("window_visibility_shortcut", {}))
@@ -1134,14 +1390,16 @@ class MainWindow(QMainWindow):
 
     def _update_profile_from_achievements(self) -> None:
         self._switch_page(5)
-        self.frontier_page.update_profile_now()
+        self._ensure_page_async(
+            "frontier",
+            lambda: self._loaded_pages["frontier"].update_profile_now(),
+        )
 
     def _reload_local_data(self) -> None:
-        self.todo_page.reload()
-        self.paper_page.reload()
-        self.notes_page.reload()
-        self.journal_page.reload()
-        self.frontier_page.reload()
+        for page_key in ("todo", "papers", "notes", "journals", "frontier"):
+            page = self._loaded_pages.get(page_key)
+            if page is not None:
+                page.reload()
         self.home_page.refresh()
         self._check_submission_reminders()
 
@@ -1213,25 +1471,20 @@ class MainWindow(QMainWindow):
         # is disabled.
         self._profile_ai_timer = QTimer(self)
         self._profile_ai_timer.setInterval(60 * 60 * 1000)
-        self._profile_ai_timer.timeout.connect(self._auto_update_frontier_profile)
+        self._profile_ai_timer.timeout.connect(self._schedule_idle_maintenance)
         self._profile_ai_timer.start()
         self._journal_ai_timer = QTimer(self)
         self._journal_ai_timer.setInterval(60 * 60 * 1000)
-        self._journal_ai_timer.timeout.connect(self._auto_enrich_new_journals)
+        self._journal_ai_timer.timeout.connect(self._schedule_idle_maintenance)
         self._journal_ai_timer.start()
-        QTimer.singleShot(11000, self._auto_update_frontier_profile)
-        QTimer.singleShot(13000, self._auto_enrich_new_journals)
 
         if not self.settings.get("frontier_background_refresh", True):
             self._frontier_timer = None
             return
         self._frontier_timer = QTimer(self)
         self._frontier_timer.setInterval(60 * 60 * 1000)
-        self._frontier_timer.timeout.connect(self.frontier_page.auto_refresh_if_due)
+        self._frontier_timer.timeout.connect(self._schedule_idle_maintenance)
         self._frontier_timer.start()
-        # Draw the tray/widget and expose cached local data first. Network
-        # work must not make a desktop sticky note feel slow at launch.
-        QTimer.singleShot(9000, self._refresh_frontier_after_startup)
 
     def _refresh_frontier_after_startup(self) -> None:
         if self.settings.get("frontier_background_refresh", True):
@@ -1264,15 +1517,21 @@ class MainWindow(QMainWindow):
             return
         reminders = due_submission_reminders(load_papers(), load_reminder_state())
         if reminders:
+            from ui.reminder_dialog import SubmissionReminderDialog
+
             self._show_reminder_dialog(SubmissionReminderDialog, reminders)
             return
         if not self.settings.get("ready_submission_reminder", True):
             return
         ready_reminders = due_ready_submission_reminders(load_papers(), load_dismissed_reminders())
         if ready_reminders:
+            from ui.reminder_dialog import ReadySubmissionDialog
+
             self._show_reminder_dialog(ReadySubmissionDialog, ready_reminders)
 
     def _show_reminder_dialog(self, dialog_type, reminders: list[dict]) -> None:
+        from ui.reminder_dialog import SubmissionReminderDialog
+
         dialog = dialog_type(reminders, self)
         if isinstance(dialog, SubmissionReminderDialog):
             dialog.snoozed.connect(self._snooze_submission_reminders)
@@ -1359,7 +1618,11 @@ class MainWindow(QMainWindow):
             snoozed.pop(str(reminder_id), None)
         state["snoozed_until"] = snoozed
         save_reminder_state(state)
-        self.paper_page.reload()
+        paper_page = self._loaded_pages.get("papers")
+        if paper_page is not None:
+            paper_page.reload()
+        else:
+            self._dirty_pages.add("papers")
         self.home_page.refresh()
 
     def _tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
@@ -1580,13 +1843,16 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, watched, event) -> bool:
         belongs_to_window = self._belongs_to_window(watched)
-        if belongs_to_window and self.workbench_shell.current_route.workbench != "home" and event.type() in {
+        interaction_events = {
             QEvent.Type.MouseButtonPress,
             QEvent.Type.MouseButtonDblClick,
             QEvent.Type.KeyPress,
             QEvent.Type.Wheel,
-        }:
-            self._home_idle_timer.start()
+        }
+        if belongs_to_window and event.type() in interaction_events:
+            self._schedule_idle_maintenance()
+            if self.workbench_shell.current_route.workbench != "home":
+                self._home_idle_timer.start()
         if not belongs_to_window or not isinstance(event, QMouseEvent):
             return super().eventFilter(watched, event)
         if self.widget_locked:
@@ -1634,8 +1900,15 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:
-        self.todo_page.save()
-        self.paper_page.save()
+        loaded_pages = getattr(self, "_loaded_pages", None)
+        pages_to_save = (
+            (loaded_pages.get("todo"), loaded_pages.get("papers"))
+            if isinstance(loaded_pages, dict)
+            else (getattr(self, "todo_page", None), getattr(self, "paper_page", None))
+        )
+        for page in pages_to_save:
+            if page is not None:
+                page.save()
         if bool(self.settings.get("close_to_tray", False)) and not self._exit_requested:
             event.ignore()
             self._hide_to_tray(notify=True)

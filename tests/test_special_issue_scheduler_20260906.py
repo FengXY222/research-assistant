@@ -37,18 +37,18 @@ class _Timer:
         cls.singles.append((delay, callback))
 
 
-def test_special_issue_due_check_runs_after_startup_and_hourly(monkeypatch):
+def test_special_issue_due_check_is_queued_for_idle_time_hourly(monkeypatch):
     _Timer.instances.clear()
     _Timer.singles.clear()
     monkeypatch.delenv("RESEARCH_ASSISTANT_DISABLE_BACKGROUND", raising=False)
     monkeypatch.setattr(main_window, "QTimer", _Timer)
-    page = SimpleNamespace(auto_refresh_if_due=lambda: None)
-    window = SimpleNamespace(special_issue_page=page)
+    schedule_idle = lambda: None
+    window = SimpleNamespace(_schedule_idle_maintenance=schedule_idle)
 
     main_window.MainWindow._start_special_issue_checks(window)
 
     timer = window._special_issue_timer
     assert timer.interval == 60 * 60 * 1000
-    assert timer.timeout.callback == page.auto_refresh_if_due
+    assert timer.timeout.callback == schedule_idle
     assert timer.started
-    assert _Timer.singles == [(12000, page.auto_refresh_if_due)]
+    assert _Timer.singles == []

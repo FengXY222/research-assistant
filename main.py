@@ -19,11 +19,10 @@ from utils.file_manager import DATA_DIR
 # Recover any interrupted multi-file action before application readers open data.
 recover_json_transactions(DATA_DIR)
 
-from PySide6.QtCore import QSharedMemory
+from PySide6.QtCore import QSharedMemory, QThread, Qt, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QMessageBox, QProgressBar, QVBoxLayout
 
-from ui.main_window import MainWindow
 from ui.theme import DIALOG_BASE_STYLE, apply_application_theme, ensure_application_font
 from utils.app_info import APP_NAME, APP_VERSION, INSTANCE_CHANNEL
 from utils.file_manager import load_app_settings
@@ -31,6 +30,59 @@ from utils.file_manager import load_app_settings
 
 SERVER_NAME = f"ScientificAssistantDesktopWidget_SingleInstance_{INSTANCE_CHANNEL}"
 SHARED_MEMORY_KEY = f"ScientificAssistantDesktopWidget_InstanceLock_{INSTANCE_CHANNEL}"
+
+
+class StartupWindow(QFrame):
+    """Small responsive surface shown while large local stores are prepared."""
+
+    def __init__(self) -> None:
+        super().__init__(None, Qt.WindowType.SplashScreen | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("startupWindow")
+        self.setFixedSize(340, 132)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 18)
+        root.setSpacing(9)
+        title = QLabel("科研助手")
+        title.setObjectName("settingsTitle")
+        root.addWidget(title)
+        self.status_label = QLabel("正在准备本地数据…")
+        self.status_label.setObjectName("settingsHint")
+        root.addWidget(self.status_label)
+        progress = QProgressBar()
+        progress.setRange(0, 0)
+        progress.setTextVisible(False)
+        progress.setFixedHeight(7)
+        root.addWidget(progress)
+
+    def show_centered(self) -> None:
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            self.move(area.center() - self.rect().center())
+        self.show()
+        self.raise_()
+
+    def set_status(self, text: str) -> None:
+        self.status_label.setText(text)
+
+
+class StartupLoadThread(QThread):
+    """Import the minimal main-window shell without blocking the first paint."""
+
+    ready = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, settings: dict) -> None:
+        super().__init__()
+        self.settings = dict(settings)
+
+    def run(self) -> None:
+        try:
+            from ui.main_window import MainWindow
+
+            self.ready.emit(MainWindow)
+        except Exception as error:  # noqa: BLE001 - startup must report any import failure
+            self.failed.emit(str(error))
 
 
 def run_startup_probe() -> int:
@@ -167,12 +219,34 @@ def main() -> int:
     if not instance.is_primary:
         return 0
 
-    window = MainWindow()
-    instance.callback = window.show_and_activate
-    if started_at_login:
-        window.start_in_tray()
-    else:
-        window.show_and_activate()
+    startup = StartupWindow()
+    if not started_at_login:
+        startup.show_centered()
+    instance.callback = startup.show_centered
+
+    window_holder: dict[str, object] = {}
+    loader = StartupLoadThread(settings)
+
+    def finish_startup(window_type) -> None:
+        startup.set_status("正在整理工作台…")
+        app.processEvents()
+        window = window_type()
+        window_holder["window"] = window
+        instance.callback = window.show_and_activate
+        startup.close()
+        if started_at_login:
+            window.start_in_tray()
+        else:
+            window.show_and_activate()
+
+    def fail_startup(message: str) -> None:
+        startup.close()
+        QMessageBox.critical(None, "科研助手启动失败", message or "未能加载主窗口。")
+        app.quit()
+
+    loader.ready.connect(finish_startup)
+    loader.failed.connect(fail_startup)
+    loader.start()
     return app.exec()
 
 

@@ -1,5 +1,5 @@
 #define MyAppName "科研助手"
-#define MyAppVersion "13.1.2"
+#define MyAppVersion "13.1.3"
 #define MyAppPublisher "个人科研工作台"
 #define MyAppExeName "科研助手.exe"
 
@@ -13,7 +13,7 @@ UsePreviousAppDir=yes
 DefaultGroupName={#MyAppName}
 PrivilegesRequired=lowest
 OutputDir=dist
-OutputBaseFilename=科研助手-v13.1.2-安装包
+OutputBaseFilename=科研助手-v13.1.3-安装包
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
