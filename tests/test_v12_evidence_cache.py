@@ -124,3 +124,26 @@ def test_special_issue_discovery_verification_and_checkpoint_round_trip(tmp_path
     assert cache.get_special_issue_discovery("si-1")["deadline"] == "2027-06-30"
     assert cache.get_special_issue_verification("si-1")["status"] == "official_verified"
     assert cache.get_job_checkpoint("special_issue_refresh")["last_success_at"] == "2026-08-31T08:00:00"
+
+
+def test_special_issue_discovery_batch_uses_one_database_session(tmp_path: Path, monkeypatch) -> None:
+    cache = EvidenceCache(tmp_path / "research_intelligence.sqlite")
+    cache.initialize()
+    real_connect = cache._connect
+    calls = []
+
+    def tracked_connect():
+        calls.append(True)
+        return real_connect()
+
+    monkeypatch.setattr(cache, "_connect", tracked_connect)
+    cache.put_special_issue_discoveries(
+        [
+            (f"si-{index}", {"title": f"Call {index}", "deadline": "2027-06-30"})
+            for index in range(200)
+        ]
+        + [("si-199", {"title": "Latest Call 199", "deadline": "2027-07-31"})]
+    )
+
+    assert len(calls) == 1
+    assert cache.get_special_issue_discovery("si-199")["title"] == "Latest Call 199"

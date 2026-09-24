@@ -71,7 +71,7 @@ def test_unknown_journal_uses_the_profile_default_score() -> None:
     assert ranked["score"] == 70
 
 
-def test_pending_stream_is_batched_and_main_stream_switch_restores_regular_filter() -> None:
+def test_pending_stream_is_internal_only_and_has_no_legacy_navigation_control() -> None:
     _app()
     page = DailyFrontierPage()
     pending = [
@@ -94,11 +94,9 @@ def test_pending_stream_is_batched_and_main_stream_switch_restores_regular_filte
     }
     page.data = {"profile": {"daily_limit": 5}, "items": [accepted, *pending]}
 
-    page.filter_combo.setCurrentText("待内容复核")
-    assert len(page.findChildren(FrontierCard)) == 24
-
-    page._switch_stream("journal")
-    assert page.filter_combo.currentText() == "今日推荐"
+    page._render()
+    assert page.filter_combo.findText("待内容复核") == -1
+    assert page.filter_combo.findText("分区待核验") == -1
     assert [item["id"] for item in page._visible_items()] == ["accepted"]
     assert len(page.findChildren(FrontierCard)) == 1
     page.close()

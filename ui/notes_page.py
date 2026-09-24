@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.dialogs import confirm_delete, show_undo_toast
+from ui.page_kit import PageHeader
 from ui.reorder import OrderDragHandle, ReorderableColumn
 from utils.file_manager import load_inspirations, load_readings, save_inspirations, save_readings
 from ui.workflow_dialogs import LinkInspirationDialog, ResearchInboxDialog
@@ -437,12 +438,11 @@ class NotesPage(QWidget):
         root = QVBoxLayout(content)
         root.setContentsMargins(14, 14, 14, 12)
         root.setSpacing(11)
-        title = QLabel("灵感与待读")
-        title.setObjectName("pageTitle")
-        root.addWidget(title)
-        subtitle = QLabel("保留研究灵感，也记录值得回看的论文")
-        subtitle.setObjectName("dateLabel")
-        root.addWidget(subtitle)
+        header = PageHeader("灵感与待读", accent="notes")
+        header.add_primary_action("＋ 灵感", lambda: self.inspiration._add())
+        menu = header.add_overflow_menu("灵感与待读更多操作")
+        menu.add_action("添加待读论文", self._add_reading)
+        root.addWidget(header)
 
         self.inspiration = InspirationPanel()
         self.inspiration.changed.connect(self.changed)

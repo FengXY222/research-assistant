@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
-from pathlib import Path
+from datetime import date
 from uuid import uuid4
 
-from PySide6.QtCore import QDate, QUrl, Qt, Signal, QThread
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -18,7 +16,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -32,10 +29,8 @@ from ui.ai_progress import AiProgressPanel
 from utils.file_manager import (
     add_inspiration,
     add_todo,
-    load_inspirations,
     load_papers,
     load_readings,
-    load_task_history,
     save_papers,
     save_readings,
 )
@@ -794,125 +789,3 @@ class LinkInspirationDialog(QDialog):
         self.remove_source = not self.keep_checkbox.isChecked()
         self.linked.emit(target, self.remove_source)
         self.accept()
-
-
-class WeeklyReviewDialog(QDialog):
-    """A local, privacy-preserving weekly review assembled from JSON records."""
-
-    open_todo = Signal()
-    open_papers = Signal()
-    open_notes = Signal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("本周回顾")
-        parent_width = parent.width() if parent else 520
-        parent_height = parent.height() if parent else 680
-        self.setMinimumWidth(360)
-        self.setMaximumWidth(max(360, min(560, parent_width - 20)))
-        self.resize(max(360, min(500, parent_width - 20)), max(470, min(620, parent_height - 20)))
-        self.setStyleSheet(_dialog_style())
-        self._build_ui()
-
-    @staticmethod
-    def _week_window() -> tuple[date, date]:
-        today = date.today()
-        return today - timedelta(days=today.weekday()), today
-
-    def _build_ui(self) -> None:
-        start, today = self._week_window()
-        start_key, today_key = start.isoformat(), today.isoformat()
-        history = [item for item in load_task_history(today, 7) if start_key <= item.get("completed_on", "") <= today_key]
-        papers = load_papers()
-        changes: list[str] = []
-        pending: list[str] = []
-        for paper in papers:
-            title = str(paper.get("title", "未命名论文"))
-            for journal in paper.get("journals", []):
-                for event in journal.get("timeline", []) if isinstance(journal.get("timeline"), list) else []:
-                    if isinstance(event, dict) and start_key <= str(event.get("date", "")) <= today_key:
-                        changes.append(f"{journal.get('name', '期刊')} · {event.get('status', '')}")
-                if str(journal.get("status", "")) == "修改中":
-                    pending.append(f"{title[:28]} · {journal.get('name', '期刊')} 修改中")
-                elif str(journal.get("status", "")) == "准备投稿":
-                    pending.append(f"{title[:28]} · {journal.get('name', '期刊')} 准备投稿")
-        inspirations = [item for item in load_inspirations() if start_key <= str(item.get("created_at", "")) <= today_key]
-        readings = [item for item in load_readings() if start_key <= str(item.get("created_at", "")) <= today_key]
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 18)
-        root.setSpacing(10)
-        title = QLabel("本周回顾")
-        title.setObjectName("workflowTitle")
-        root.addWidget(title)
-        subtitle = QLabel(f"{start.strftime('%m月%d日')} — {today.strftime('%m月%d日')} · 只统计本地记录")
-        subtitle.setObjectName("workflowHint")
-        root.addWidget(subtitle)
-
-        metrics = QFrame()
-        metrics.setObjectName("workflowCard")
-        metric_layout = QHBoxLayout(metrics)
-        metric_layout.setContentsMargins(12, 10, 12, 10)
-        for heading, value in [
-            ("完成任务", len(history)),
-            ("论文节点", len(changes)),
-            ("新增灵感", len(inspirations)),
-            ("新增待读", len(readings)),
-        ]:
-            block = QVBoxLayout()
-            h = QLabel(heading)
-            h.setObjectName("workflowMeta")
-            v = QLabel(str(value))
-            v.setObjectName("workflowHeading")
-            block.addWidget(h)
-            block.addWidget(v)
-            metric_layout.addLayout(block)
-        root.addWidget(metrics)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        content = QWidget()
-        box = QVBoxLayout(content)
-        box.setContentsMargins(1, 1, 6, 2)
-        box.setSpacing(8)
-
-        def add_section(heading: str, rows: list[str], empty: str) -> None:
-            card = QFrame()
-            card.setObjectName("workflowCard")
-            section = QVBoxLayout(card)
-            section.setContentsMargins(12, 9, 12, 9)
-            section.setSpacing(4)
-            label = QLabel(heading)
-            label.setObjectName("workflowHeading")
-            section.addWidget(label)
-            values = rows or [empty]
-            for row in values[:8]:
-                item = QLabel("• " + row)
-                item.setObjectName("workflowMeta")
-                item.setWordWrap(True)
-                section.addWidget(item)
-            box.addWidget(card)
-
-        add_section("本周完成", [str(item.get("title", "")) for item in history], "本周还没有完成记录。")
-        add_section("论文状态变化", changes, "本周没有新的投稿节点。")
-        add_section("下周优先处理", pending, "当前没有准备投稿或修改中的论文。")
-        box.addStretch()
-        scroll.setWidget(content)
-        root.addWidget(scroll, 1)
-
-        actions = QHBoxLayout()
-        todo = QPushButton("查看待办")
-        todo.clicked.connect(self.open_todo.emit)
-        papers_button = QPushButton("查看投稿")
-        papers_button.clicked.connect(self.open_papers.emit)
-        notes = QPushButton("查看灵感")
-        notes.clicked.connect(self.open_notes.emit)
-        close = QPushButton("关闭")
-        close.clicked.connect(self.accept)
-        actions.addWidget(todo)
-        actions.addWidget(papers_button)
-        actions.addWidget(notes)
-        actions.addStretch()
-        actions.addWidget(close)
-        root.addLayout(actions)

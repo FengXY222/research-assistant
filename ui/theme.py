@@ -24,72 +24,17 @@ THEME_REGISTRY: Final[dict[str, dict[str, str]]] = {
         "muted": "#61777A", "border": "#B8CBC8", "field": "#FFFFFF", "raised": "#E2ECEA",
         "hover": "#D7E7E5", "selection": "#C6E2DF", "on_accent": "#FFFFFF", "dark": "false",
     },
-    "ink_white": {
-        "name": "墨白", "window": "#EDF3F8", "surface": "#FFFFFF", "text": "#152A3A",
-        "accent": "#285B7A", "success": "#3F7A69", "warning": "#A86D31", "danger": "#A94C50",
-        "muted": "#647584", "border": "#C4D0D8", "field": "#FFFFFF", "raised": "#E6EEF5",
-        "hover": "#D8E8F4", "selection": "#C8E0F0", "on_accent": "#FFFFFF", "dark": "false",
-    },
-    "moss_paper": {
-        "name": "苔纸绿", "window": "#EEF2EA", "surface": "#FBFCF8", "text": "#263729",
-        "accent": "#4C7657", "success": "#4E7B5B", "warning": "#956C34", "danger": "#A2564B",
-        "muted": "#6C796C", "border": "#C8D1C2", "field": "#FFFFFF", "raised": "#E7ECE1",
-        "hover": "#DCE8D8", "selection": "#CFE0CB", "on_accent": "#FFFFFF", "dark": "false",
-    },
-    "warm_sand": {
-        "name": "暖砂", "window": "#F5F0E7", "surface": "#FFFCF6", "text": "#413329",
-        "accent": "#93643B", "success": "#5E7A5A", "warning": "#A96B2C", "danger": "#A45248",
-        "muted": "#7A6A5D", "border": "#D8CBBB", "field": "#FFFFFF", "raised": "#F0E7D9",
-        "hover": "#ECDDCA", "selection": "#E6D2B7", "on_accent": "#FFFFFF", "dark": "false",
-    },
-    "graphite_mist": {
-        "name": "石墨雾", "window": "#ECEFF0", "surface": "#FAFBFB", "text": "#2B3437",
-        "accent": "#4E6870", "success": "#4E7464", "warning": "#93692E", "danger": "#A55252",
-        "muted": "#6B787C", "border": "#C7D0D2", "field": "#FFFFFF", "raised": "#E3E8E9",
-        "hover": "#D9E1E3", "selection": "#CDDCE0", "on_accent": "#FFFFFF", "dark": "false",
-    },
-    "night_sea": {
-        "name": "夜海", "window": "#0E1927", "surface": "#152337", "text": "#E8F1F5",
-        "accent": "#68B8C5", "success": "#75C49A", "warning": "#E1AE66", "danger": "#E88989",
-        "muted": "#A8BBC5", "border": "#39536C", "field": "#1C2D44", "raised": "#20344C",
-        "hover": "#29455F", "selection": "#285B66", "on_accent": "#10202B", "dark": "true",
-    },
-    "cinnabar_paper": {
-        "name": "朱砂米", "window": "#F8F4EF", "surface": "#FFFCF8", "text": "#29262A",
-        "accent": "#9E3D36", "success": "#2F7668", "warning": "#B9751C", "danger": "#9F3342",
-        "muted": "#716B67", "border": "#DDD1C9", "field": "#FFFFFF", "raised": "#F1E4DB",
-        "hover": "#F5DCD1", "selection": "#F2CCC1", "on_accent": "#FFFFFF", "dark": "false",
-    },
-    "violet_grove": {
-        "name": "紫藤暮", "window": "#F4F1FA", "surface": "#FEFCFF", "text": "#2D2940",
-        "accent": "#6950A1", "success": "#2E7865", "warning": "#B16D16", "danger": "#B7435B",
-        "muted": "#736E85", "border": "#D6CCE6", "field": "#FFFFFF", "raised": "#EDE7F7",
-        "hover": "#E2D9F2", "selection": "#DCD0EF", "on_accent": "#FFFFFF", "dark": "false",
-    },
-    "sunrise_cloud": {
-        "name": "朝霞青", "window": "#F6F1EC", "surface": "#FEFBF7", "text": "#33302E",
-        "accent": "#D4624A", "success": "#2E8B74", "warning": "#D9932F", "danger": "#C0464F",
-        "muted": "#7A7069", "border": "#E0D2C8", "field": "#FFFFFF", "raised": "#F1E6DD",
-        "hover": "#F7DED4", "selection": "#F6CEC2", "on_accent": "#FFFFFF", "dark": "false",
-    },
-    "aurora_night": {
-        "name": "极光夜", "window": "#101820", "surface": "#182430", "text": "#E6F2F0",
-        "accent": "#3EC6A8", "success": "#7FDBB8", "warning": "#F2C14E", "danger": "#F07178",
-        "muted": "#9FB3B8", "border": "#2C4450", "field": "#1B2A36", "raised": "#223442",
-        "hover": "#2C4250", "selection": "#20574F", "on_accent": "#0C1A14", "dark": "true",
-    },
-    "iris_sun": {
-        "name": "鸢尾橙阳", "window": "#F0F2FA", "surface": "#FBFBFE", "text": "#262B3D",
-        "accent": "#4A6FD8", "success": "#E8893C", "warning": "#C9A227", "danger": "#D24A5E",
-        "muted": "#6F7691", "border": "#CBD2E8", "field": "#FFFFFF", "raised": "#E6EAF7",
-        "hover": "#DAE2F5", "selection": "#C9D6F2", "on_accent": "#FFFFFF", "dark": "false",
-    },
-    "night_coral": {
-        "name": "夜航朱", "window": "#171B26", "surface": "#202635", "text": "#F2F1ED",
-        "accent": "#E76F51", "success": "#43B5A0", "warning": "#F2BF5E", "danger": "#E4636D",
-        "muted": "#B1B6C4", "border": "#48516A", "field": "#272F42", "raised": "#2F394F",
-        "hover": "#3B4760", "selection": "#4B4053", "on_accent": "#151820", "dark": "true",
-    },
+}
+
+SECTION_ACCENTS: Final[dict[str, str]] = {
+    "home": "#246F79",
+    "frontier": "#4A78D0",
+    "journals": "#2F8B62",
+    "special_issues": "#D77A32",
+    "papers": "#7656B6",
+    "achievements": "#278C93",
+    "todo": "#B88318",
+    "notes": "#C05B83",
 }
 
 
@@ -126,7 +71,8 @@ def ensure_application_font(application: QApplication) -> str:
 
 def get_theme(theme_id: str | None) -> dict[str, str]:
     """Return a copy so consumers cannot mutate the registry."""
-    return dict(THEME_REGISTRY.get(str(theme_id or "").strip(), THEME_REGISTRY["fog_teal"]))
+    del theme_id
+    return dict(THEME_REGISTRY["fog_teal"])
 
 
 def theme_choices() -> list[tuple[str, str]]:
@@ -138,8 +84,8 @@ def normalize_density(value: str | None) -> str:
 
 
 def _theme_id(theme_id: str | None) -> str:
-    value = str(theme_id or "").strip()
-    return value if value in THEME_REGISTRY else "fog_teal"
+    del theme_id
+    return "fog_teal"
 
 
 def build_application_stylesheet(theme_id: str | None = "fog_teal", density: str | None = "comfortable") -> str:
@@ -154,7 +100,7 @@ def build_application_stylesheet(theme_id: str | None = "fog_teal", density: str
     """
     compact = normalize_density(density) == "compact"
     base_size = 11 if compact else 12
-    title_size = 22 if compact else 24
+    title_size = 16 if compact else 18
     card_title_size = 11 if compact else 12
     spacing = 5 if compact else 7
     return f"""
@@ -200,10 +146,48 @@ def build_application_stylesheet(theme_id: str | None = "fog_teal", density: str
         #archiveCornerButton {{ color: palette(link-visited); padding: 4px 7px; }}
         #closeButton, #dangerButton {{ background: transparent; color: palette(link-visited); border-color: transparent; }}
         #closeButton:hover, #dangerButton:hover {{ background: palette(link-visited); color: palette(base); border-color: palette(link-visited); }}
-        #navButton {{ background: transparent; color: palette(mid); border: 0; border-radius: 7px; padding: 6px 5px; font-size: 9px; letter-spacing: 1px; }}
+        #navButton {{ background: transparent; color: palette(mid); border: 0; border-radius: 7px; padding: 7px 6px; font-size: 11px; text-align: left; }}
         #navButton:hover {{ background: palette(light); color: palette(window-text); }}
         #navButton:checked {{ background: palette(midlight); color: palette(highlight); font-weight: 700; }}
         #sidebarPinButton, #lockButton:checked {{ background: palette(midlight); border-color: palette(highlight); color: palette(highlight); }}
+        #workbenchChip[accent="tasks"]:checked {{ background: #F1E2BC; color: #7A540E; border-color: #B88318; }}
+        #workbenchChip[accent="notes"]:checked {{ background: #F5E0E9; color: #91415F; border-color: #C05B83; }}
+        #workbenchChip[accent="submissions"]:checked {{ background: #EAE3F5; color: #5D4192; border-color: #7656B6; }}
+        #workbenchChip[accent="results"]:checked {{ background: #DCEFF0; color: #1D6D72; border-color: #278C93; }}
+        #workbenchChip[accent="frontier"]:checked {{ background: #E4EBF8; color: #315DAA; border-color: #4A78D0; }}
+        #workbenchChip[accent="journals"]:checked {{ background: #E1F0E8; color: #226B4A; border-color: #2F8B62; }}
+        #workbenchChip[accent="special_issues"]:checked {{ background: #F8E6D7; color: #A9561D; border-color: #D77A32; }}
+
+        #pageHeader {{ background: palette(alternate-base); border: 1px solid palette(shadow); border-left: 3px solid palette(highlight); border-radius: 8px; }}
+        #pageHeaderTitle {{ color: palette(window-text); font-size: {title_size}px; font-weight: 700; }}
+        #pageHeaderHint, #filterCount {{ color: palette(mid); font-size: 11px; }}
+        #filterBar {{ background: transparent; }}
+        #ellipsisButton {{ min-width: 28px; max-width: 28px; padding: {spacing}px 2px; font-weight: 700; }}
+        #statusBadge {{ background: palette(button); color: palette(mid); border-radius: 7px; padding: 3px 6px; font-size: 10px; }}
+        #statusBadge[tone="success"] {{ color: #2F8B62; background: #E5F3EC; }}
+        #statusBadge[tone="info"] {{ color: #3D67B4; background: #E8EEF9; }}
+        #statusBadge[tone="warning"] {{ color: #B25E24; background: #FAEBDD; }}
+        #statusBadge[tone="muted"] {{ color: #61777A; background: #E7ECEB; }}
+
+        #pageHeader[accent="frontier"], #accentCard[accent="frontier"] {{ border-left-color: #4A78D0; }}
+        #pageHeader[accent="journals"], #accentCard[accent="journals"] {{ border-left-color: #2F8B62; }}
+        #pageHeader[accent="special_issues"], #accentCard[accent="special_issues"] {{ border-left-color: #D77A32; }}
+        #pageHeader[accent="papers"], #accentCard[accent="papers"] {{ border-left-color: #7656B6; }}
+        #pageHeader[accent="achievements"], #accentCard[accent="achievements"] {{ border-left-color: #278C93; }}
+        #pageHeader[accent="todo"], #accentCard[accent="todo"] {{ border-left-color: #B88318; }}
+        #pageHeader[accent="notes"], #accentCard[accent="notes"] {{ border-left-color: #C05B83; }}
+        #pageHeader[accent="home"], #accentCard[accent="home"] {{ border-left-color: #246F79; }}
+        #accentCard {{ background: palette(alternate-base); border: 1px solid palette(shadow); border-left: 3px solid palette(highlight); border-radius: 8px; }}
+        #accentCard:hover {{ border-color: palette(highlight); }}
+
+        #accentPrimary[accent="frontier"] {{ background: #4A78D0; border-color: #4A78D0; color: white; }}
+        #accentPrimary[accent="journals"] {{ background: #2F8B62; border-color: #2F8B62; color: white; }}
+        #accentPrimary[accent="special_issues"] {{ background: #D77A32; border-color: #D77A32; color: white; }}
+        #accentPrimary[accent="papers"] {{ background: #7656B6; border-color: #7656B6; color: white; }}
+        #accentPrimary[accent="achievements"] {{ background: #278C93; border-color: #278C93; color: white; }}
+        #accentPrimary[accent="todo"] {{ background: #B88318; border-color: #B88318; color: white; }}
+        #accentPrimary[accent="notes"] {{ background: #C05B83; border-color: #C05B83; color: white; }}
+        #accentPrimary[accent="home"] {{ background: #246F79; border-color: #246F79; color: white; }}
 
         QLineEdit, QDateEdit, QComboBox, QPlainTextEdit, QTextEdit, QSpinBox, QKeySequenceEdit {{
             background: palette(base); color: palette(text); border: 1px solid palette(shadow);

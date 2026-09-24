@@ -14,7 +14,9 @@ from difflib import SequenceMatcher
 from html import unescape
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from utils.api_rate_limit import rate_limited_urlopen as urlopen
 
 from utils.evidence_cache import EvidenceCache
 from utils.journal_quality import journal_quality_snapshot
@@ -457,6 +459,36 @@ def merge_special_issue_records(records: list[dict[str, Any]]) -> list[dict[str,
     return result
 
 
+_READ_ONLY_OFFICIAL_HOSTS = (
+    "elsevier.com",
+    "sciencedirect.com",
+    "wiley.com",
+    "onlinelibrary.wiley.com",
+    "wiley-vch.de",
+)
+
+
+def _request_public_page(url: str) -> str:
+    request = Request(
+        url,
+        headers={
+            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8",
+            "User-Agent": "ResearchAssistant/13.0 (personal academic verification)",
+        },
+    )
+    with urlopen(request, timeout=20) as response:  # noqa: S310 - URL is validated by the caller
+        return response.read().decode("utf-8", errors="replace")
+
+
+def _official_reader_url(url: str) -> str:
+    parts = urlsplit(url)
+    host = (parts.hostname or "").casefold().rstrip(".")
+    if not any(host == domain or host.endswith("." + domain) for domain in _READ_ONLY_OFFICIAL_HOSTS):
+        return ""
+    target = urlunsplit(("http", parts.netloc, parts.path, parts.query, ""))
+    return "https://r.jina.ai/" + target
+
+
 def _fetch_official_page(url: str) -> str:
     parts = urlsplit(url)
     if parts.scheme not in {"http", "https"} or not parts.hostname:
@@ -470,15 +502,19 @@ def _fetch_official_page(url: str) -> str:
         address = None
     if address is not None and (address.is_private or address.is_loopback or address.is_link_local):
         raise ValueError("不允许访问私有网络地址")
-    request = Request(
-        url,
-        headers={
-            "Accept": "text/html,application/xhtml+xml",
-            "User-Agent": "ResearchAssistant/12.0 (personal academic verification)",
-        },
-    )
-    with urlopen(request, timeout=20) as response:  # noqa: S310 - URL is validated above
-        return response.read().decode("utf-8", errors="replace")
+    try:
+        return _request_public_page(url)
+    except Exception as direct_error:  # noqa: BLE001 - selected publishers expose a read-only mirror path
+        reader_url = _official_reader_url(url)
+        if not reader_url:
+            raise
+        try:
+            page = _request_public_page(reader_url)
+        except Exception as reader_error:  # noqa: BLE001 - preserve both transport failures for diagnostics
+            raise OSError(f"官网直连失败：{direct_error}；只读备用入口失败：{reader_error}") from reader_error
+        if not str(page).strip():
+            raise OSError(f"官网直连失败：{direct_error}；只读备用入口返回空内容") from direct_error
+        return page
 
 
 def _page_deadline(page_text: str) -> str:
@@ -749,6 +785,7 @@ def build_special_issue_notifications(
     today: date,
 ) -> list[dict[str, Any]]:
     """Apply the confirmed high-match, deadline and closure notification policy."""
+    from utils.special_issue_policy import evaluate_special_issue
     from utils.submission_reminders import collect_special_issue_reminders
 
     before_items = {
@@ -785,15 +822,23 @@ def build_special_issue_notifications(
         verification = str(item.get("verification_status", "")).casefold()
         call_status = str(item.get("call_status", "")).casefold()
         is_closed = verification in {"closed", "expired"} or call_status in {"closed", "expired"}
-        if previous is None and not is_closed and bool(match.get("formal", False)) and score >= 80:
+        is_v13 = str(item.get("scoring_version", "")).startswith("special-issue-dual-axis-13")
+        v13_view = evaluate_special_issue(item, now=datetime.combine(today, datetime.min.time())) if is_v13 else {}
+        high_match = (
+            bool(v13_view.get("recommended")) and int(v13_view.get("score", 0) or 0) >= 80
+            if is_v13
+            else bool(match.get("formal", False)) and score >= 80
+        )
+        display_score = int(v13_view.get("score", 0) or 0) if is_v13 else score
+        if previous is None and not is_closed and high_match:
             add(
                 {
                     "id": f"special-issue|new-high|{issue_id}",
                     "kind": "new_high_match",
                     "issue_id": issue_id,
                     "title": "发现高匹配特刊",
-                    "body": f"{title} · AI 总分 {score}",
-                    "score": score,
+                    "body": f"{title} · 双轴综合 {display_score}",
+                    "score": display_score,
                 }
             )
             continue
@@ -840,6 +885,48 @@ def build_special_issue_notifications(
     return result
 
 
+def _complete_special_issue_ai_axes(value: Any) -> bool:
+    """Return whether a stored v13 match contains both validated AI axes.
+
+    Older releases persisted a single 0-100 match score.  That score is still
+    useful evidence, but it must not make the v13 dual-axis pipeline think AI
+    has already supplied its bounded 34-point contribution.
+    """
+
+    if not isinstance(value, dict):
+        return False
+    payload = value.get("ai_axis_payload", value)
+    payload = payload if isinstance(payload, dict) else {}
+    axes = payload.get("axes", {}) if isinstance(payload.get("axes"), dict) else {}
+    for name in ("relevance", "opportunity"):
+        axis = axes.get(name, {}) if isinstance(axes.get(name), dict) else {}
+        try:
+            adjustment = int(round(float(axis.get("adjustment"))))
+        except (TypeError, ValueError):
+            return False
+        if not 0 <= adjustment <= 34:
+            return False
+        if str(axis.get("confidence", "")).casefold() not in {"medium", "high"}:
+            return False
+        if not [str(item).strip() for item in axis.get("evidence_refs", []) if str(item).strip()]:
+            return False
+    return True
+
+
+def _special_issue_needs_ai_backfill(item: dict[str, Any]) -> bool:
+    """Identify an open v13 record whose legacy match has no dual-axis AI."""
+
+    if not str(item.get("scoring_version", "")).startswith("special-issue-dual-axis-13"):
+        return False
+    if str(item.get("verification_status", "")).casefold() in {"closed", "expired", "conflict"}:
+        return False
+    if not str(item.get("title", "")).strip():
+        return False
+    match = item.get("match") if isinstance(item.get("match"), dict) else {}
+    payload = match.get("ai_axis_payload") if isinstance(match.get("ai_axis_payload"), dict) else item.get("ai_axis_payload")
+    return not _complete_special_issue_ai_axes(payload)
+
+
 def refresh_special_issues(
     *,
     sources: list[Any] | None = None,
@@ -855,7 +942,7 @@ def refresh_special_issues(
     enricher: Any = None,
     easyscholar_ready: bool | None = None,
     persist: bool = True,
-    candidate_limit: int = 36,
+    candidate_limit: int = 0,
     translate_scopes: bool | None = None,
     force: bool = False,
     cancelled: Any = None,
@@ -873,15 +960,19 @@ def refresh_special_issues(
     from utils.special_issue_sources import default_special_issue_sources
 
     now = now or datetime.now()
+    last_progress_value = 0
 
     def is_cancelled() -> bool:
         return bool(cancelled and cancelled())
 
     def emit(message: str, value: int) -> None:
+        nonlocal last_progress_value
         if progress is None:
             return
+        bounded = max(last_progress_value, max(0, min(100, int(value))))
+        last_progress_value = bounded
         try:
-            progress(message, max(0, min(100, int(value))))
+            progress(message, bounded)
         except TypeError:
             progress(message)
 
@@ -909,6 +1000,57 @@ def refresh_special_issues(
         cache = EvidenceCache(file_manager.RESEARCH_INTELLIGENCE_CACHE_FILE)
     cache.initialize()
     source_rows = sources if sources is not None else default_special_issue_sources()
+    if sources is None:
+        from utils.source_registry import normalize_source_settings
+
+        source_settings = normalize_source_settings(file_manager.load_app_settings().get("data_sources"))
+        source_rows = [
+            source
+            for source in source_rows
+            if bool(source_settings.get(str(getattr(source, "source_id", "")), {}).get("enabled", True))
+        ]
+    source_checkpoints = deepcopy(before.get("source_checkpoints", {}))
+    from utils.source_registry import SOURCE_REGISTRY
+
+    for retired_id, source_spec in SOURCE_REGISTRY.items():
+        if not source_spec.get("retired"):
+            continue
+        retired_checkpoint = deepcopy(source_checkpoints.get(retired_id, {}))
+        retired_checkpoint.update(
+            {
+                "status": "retired",
+                "retired_at": now.isoformat(timespec="seconds"),
+                "retired_reason": "official_source_disabled_in_favor_of_third_party_discovery",
+                "consecutive_failures": 0,
+            }
+        )
+        retired_checkpoint.pop("next_retry_at", None)
+        retired_checkpoint.pop("last_error", None)
+        source_checkpoints[retired_id] = retired_checkpoint
+    retry_states = {"failed", "partial", "cancelled", "pending", "running"}
+    failed_source_ids = {
+        str(source_id)
+        for source_id, checkpoint_value in source_checkpoints.items()
+        if isinstance(checkpoint_value, dict)
+        and str(checkpoint_value.get("status", "")).casefold() in retry_states
+    }
+    # A source may be retired between releases (Elsevier's official scraper is
+    # now one such source).  Its historical failed checkpoint must not turn a
+    # later retry into an empty source run.
+    available_source_ids = {
+        str(getattr(source, "source_id", "source"))
+        for source in source_rows
+    }
+    failed_source_ids.intersection_update(available_source_ids)
+    retrying_failed_sources = bool(
+        failed_source_ids and str(before.get("last_refresh_status", "never")).casefold() != "success"
+    )
+    if retrying_failed_sources:
+        source_rows = [
+            source
+            for source in source_rows
+            if str(getattr(source, "source_id", "source")) in failed_source_ids
+        ]
     try:
         since = datetime.fromisoformat(str(before.get("last_checked_at", "")))
     except ValueError:
@@ -916,9 +1058,13 @@ def refresh_special_issues(
     emit("正在从出版社与聚合来源发现征稿…", 2)
     discovered: list[dict[str, Any]] = []
     fetched_raw = 0
-    source_checkpoints = deepcopy(before.get("source_checkpoints", {}))
     source_outcomes: list[str] = []
     attempted_sources = 0
+    attempted_source_ids: set[str] = set()
+    planned_source_ids = {
+        str(getattr(source, "source_id", "source"))
+        for source in source_rows
+    }
     for index, source in enumerate(source_rows):
         if is_cancelled():
             break
@@ -939,16 +1085,82 @@ def refresh_special_issues(
             if comparison_now < retry_at and not force:
                 continue
         attempted_sources += 1
+        attempted_source_ids.add(source_id)
 
         def source_progress(message: str, value: int = 0, *, _base=base) -> None:
             emit(message, _base + int(max(0, value) * 3 / 100))
 
         source_error = ""
+
+        def commit_shard(
+            *,
+            shard_id: str,
+            file_name: str,
+            rows: list[dict[str, Any]],
+            status: str,
+            error: str = "",
+        ) -> None:
+            """Persist one completed shard without publishing it as verified."""
+
+            nonlocal before
+            current_checkpoint = deepcopy(source_checkpoints.get(source_id, previous_checkpoint))
+            shards = deepcopy(current_checkpoint.get("shards", {})) if isinstance(current_checkpoint.get("shards"), dict) else {}
+            shard_status = str(status).casefold()
+            shards[str(shard_id)] = {
+                "status": shard_status,
+                "file": str(file_name),
+                "row_count": len(rows),
+                "updated_at": now.isoformat(timespec="seconds"),
+                "error": str(error)[:240] if shard_status != "success" else "",
+            }
+            current_checkpoint["shards"] = shards
+            current_checkpoint["status"] = "running" if shard_status == "success" else "partial"
+            current_checkpoint["last_attempt_at"] = now.isoformat(timespec="seconds")
+            source_checkpoints[source_id] = current_checkpoint
+            normalized_rows: list[dict[str, Any]] = []
+            cache_rows: list[tuple[str, dict[str, Any]]] = []
+            for raw in rows:
+                if not isinstance(raw, dict):
+                    continue
+                normalized = normalize_special_issue(
+                    raw,
+                    source=str(raw.get("source", source_id)),
+                    fetched_at=now.isoformat(timespec="seconds"),
+                    today=now.date(),
+                )
+                if normalized is None:
+                    continue
+                normalized_rows.append(normalized)
+                cache_rows.append((str(normalized.get("dedupe_key", normalized["id"])), normalized))
+            cache.put_special_issue_discoveries(cache_rows)
+            if persist:
+                shard_patch = normalize_special_issue_store(
+                    {
+                        **before,
+                        "items": normalized_rows,
+                        "source_checkpoints": source_checkpoints,
+                        "last_refresh_status": "running",
+                    }
+                )
+                before = commit_special_issue_refresh(shard_patch, token=refresh_token)
+
+        shard_callback_enabled = False
         try:
             parameters = inspect.signature(source.fetch).parameters
             kwargs = {"since": since, "progress": source_progress}
             if "keywords" in parameters:
                 kwargs["keywords"] = discovery_terms
+            if "today" in parameters:
+                kwargs["today"] = now.date()
+            if "cancelled" in parameters:
+                kwargs["cancelled"] = is_cancelled
+            if "shard_checkpoints" in parameters:
+                kwargs["shard_checkpoints"] = deepcopy(previous_checkpoint.get("shards", {}))
+            if "retry_failed_only" in parameters:
+                kwargs["retry_failed_only"] = str(previous_checkpoint.get("status", "")).casefold() in retry_states
+            if "on_shard" in parameters:
+                kwargs["on_shard"] = commit_shard
+                shard_callback_enabled = True
             raw_rows = source.fetch(**kwargs)
         except Exception as error:  # noqa: BLE001 - source failures are isolated twice
             emit(f"一个征稿来源暂不可用，已继续：{error}", base)
@@ -962,6 +1174,7 @@ def refresh_special_issues(
             errors = getattr(raw_rows, "errors", [])
             if errors:
                 source_error = "; ".join(str(value.get("error", "")) for value in errors if isinstance(value, dict))[:240]
+        previous_checkpoint = deepcopy(source_checkpoints.get(source_id, previous_checkpoint))
         source_outcomes.append(source_status)
         checkpoint = deepcopy(previous_checkpoint)
         checkpoint["status"] = source_status
@@ -981,6 +1194,20 @@ def refresh_special_issues(
             if source_status == "partial":
                 checkpoint["last_success_at"] = now.isoformat(timespec="seconds")
         source_checkpoints[source_id] = checkpoint
+        from utils.source_registry import record_source_outcome
+
+        health = record_source_outcome(
+            previous_checkpoint.get("health"),
+            at=now,
+            success=source_status == "success",
+            result_count=len(raw_rows) if isinstance(raw_rows, list) else 0,
+            error_type="partial" if source_status == "partial" else "source_failure" if source_status == "failed" else "",
+            error=source_error,
+            successful_watermark=now.isoformat(timespec="seconds") if source_status == "success" else "",
+        )
+        checkpoint["health"] = health
+        checkpoint["health_state"] = "DEGRADED" if source_status == "partial" else health["state"]
+        source_cache_rows: list[tuple[str, dict[str, Any]]] = []
         for raw in raw_rows if isinstance(raw_rows, list) else []:
             if not isinstance(raw, dict):
                 continue
@@ -993,8 +1220,14 @@ def refresh_special_issues(
             )
             if normalized is not None:
                 discovered.append(normalized)
-                cache.put_special_issue_discovery(str(normalized.get("dedupe_key", normalized["id"])), normalized)
+                if not shard_callback_enabled:
+                    source_cache_rows.append((str(normalized.get("dedupe_key", normalized["id"])), normalized))
+        cache.put_special_issue_discoveries(source_cache_rows)
     if is_cancelled():
+        for source_id in planned_source_ids - attempted_source_ids:
+            checkpoint_value = deepcopy(source_checkpoints.get(source_id, {}))
+            checkpoint_value["status"] = "pending"
+            source_checkpoints[source_id] = checkpoint_value
         cancelled_store = normalize_special_issue_store(
             {**before, "source_checkpoints": source_checkpoints, "last_refresh_status": "cancelled"}
         )
@@ -1014,13 +1247,50 @@ def refresh_special_issues(
             "notifications": [],
             "stats": {"raw": 0, "discovered": 0, "items": 0, "eligible": 0},
         }
+    all_attempted_failed = bool(source_outcomes and all(value == "failed" for value in source_outcomes))
+    has_prior_results = bool(before.get("items"))
+    has_prior_successful_source = any(
+        isinstance(value, dict) and str(value.get("status", "")).casefold() == "success"
+        for source_id, value in source_checkpoints.items()
+        if source_id not in attempted_source_ids
+    )
     refresh_status = (
-        "failed"
-        if source_outcomes and all(value == "failed" for value in source_outcomes)
+        "partial"
+        if all_attempted_failed and (has_prior_results or has_prior_successful_source)
+        else "failed"
+        if all_attempted_failed
         else "partial"
         if any(value in {"failed", "partial"} for value in source_outcomes)
         else "success"
     )
+    needs_ai_backfill = any(
+        _special_issue_needs_ai_backfill(value)
+        for value in before.get("items", [])
+        if isinstance(value, dict)
+    )
+    if all_attempted_failed and refresh_status == "partial" and not needs_ai_backfill:
+        from utils.special_issue_policy import evaluate_special_issue
+
+        retained_store = normalize_special_issue_store(
+            {**before, "source_checkpoints": source_checkpoints, "last_refresh_status": "partial"}
+        )
+        if persist:
+            retained_store = commit_special_issue_refresh(retained_store, token=refresh_token)
+        retained_items = [value for value in retained_store.get("items", []) if isinstance(value, dict)]
+        retained_visible = sum(
+            bool(evaluate_special_issue(value, now=now, view="recommended").get("visible"))
+            for value in retained_items
+        )
+        cache.put_job_checkpoint(
+            "special_issue_refresh",
+            {"checked_at": now.isoformat(timespec="seconds"), "status": "partial", "discovered": 0},
+        )
+        return {
+            "store": retained_store,
+            "notifications": [],
+            "stats": {"raw": fetched_raw, "discovered": 0, "items": len(retained_items), "eligible": retained_visible},
+        }
+    backfill_only = bool(all_attempted_failed and refresh_status == "partial" and needs_ai_backfill)
     if refresh_status == "failed":
         failed_store = normalize_special_issue_store(
             {**before, "source_checkpoints": source_checkpoints, "last_refresh_status": "failed"}
@@ -1096,6 +1366,26 @@ def refresh_special_issues(
         merged = retained
     processed_ids = {str(value.get("id", "")) for value in merged}
     deferred = [value for value in all_merged if str(value.get("id", "")) not in processed_ids]
+    if retrying_failed_sources:
+        # A successful retry belongs only to the sources that previously
+        # failed.  Re-check newly returned/changed records plus local v13 AI
+        # backfills, while carrying every healthy historical row forward
+        # untouched.  This avoids a minutes-long full-library verification on
+        # every small source recovery.
+        retry_keys = {
+            special_issue_dedupe_key(value)
+            for value in discovered
+            if isinstance(value, dict)
+        }
+        retry_items: list[dict[str, Any]] = []
+        retry_deferred = list(deferred)
+        for value in merged:
+            if special_issue_dedupe_key(value) in retry_keys or _special_issue_needs_ai_backfill(value):
+                retry_items.append(value)
+            else:
+                retry_deferred.append(value)
+        merged = retry_items
+        deferred = retry_deferred
     emit("正在逐项检查官网、截止日期与征稿状态…", 25)
     verifier = verifier or verify_special_issue
     enricher = enricher or enrich_special_issue_journal
@@ -1107,21 +1397,28 @@ def refresh_special_issues(
         except Exception:
             easyscholar_ready = False
     verified: list[dict[str, Any]] = []
-    for index, item in enumerate(merged):
-        if is_cancelled():
-            break
-        emit(f"正在核验征稿 {index + 1}/{len(merged)}…", 25 + int((index + 1) * 25 / max(1, len(merged))))
-        try:
-            checked = verifier(item, now=now, cache=cache)
-        except Exception as error:  # noqa: BLE001 - one broken page stays pending
-            checked = deepcopy(item)
-            checked["verification_status"] = "temporarily_unavailable"
-            checked["verification_error"] = str(error)[:240]
-        try:
-            checked = enricher(checked, library, easyscholar_ready=bool(easyscholar_ready))
-        except Exception as error:  # noqa: BLE001 - unknown facts remain visible
-            checked["journal_enrichment_error"] = str(error)[:240]
-        verified.append(checked)
+    if backfill_only:
+        # Failed publisher retries must not re-fetch every healthy official
+        # page.  They may still finish a one-time local v13 AI-score backfill
+        # for records already present in the store.
+        emit("来源补跑失败，正在补齐历史特刊的双轴 AI 评分…", 25)
+        verified = [deepcopy(item) for item in merged]
+    else:
+        for index, item in enumerate(merged):
+            if is_cancelled():
+                break
+            emit(f"正在核验征稿 {index + 1}/{len(merged)}…", 25 + int((index + 1) * 25 / max(1, len(merged))))
+            try:
+                checked = verifier(item, now=now, cache=cache)
+            except Exception as error:  # noqa: BLE001 - one broken page stays pending
+                checked = deepcopy(item)
+                checked["verification_status"] = "temporarily_unavailable"
+                checked["verification_error"] = str(error)[:240]
+            try:
+                checked = enricher(checked, library, easyscholar_ready=bool(easyscholar_ready))
+            except Exception as error:  # noqa: BLE001 - unknown facts remain visible
+                checked["journal_enrichment_error"] = str(error)[:240]
+            verified.append(checked)
     if is_cancelled():
         cancelled_store = normalize_special_issue_store(
             {**before, "source_checkpoints": source_checkpoints, "last_refresh_status": "cancelled"}
@@ -1152,7 +1449,7 @@ def refresh_special_issues(
                 break
             emit(
                 f"正在离线翻译征稿范围 {index}/{len(translatable)}…",
-                48 + int(index * 4 / max(1, len(translatable))),
+                51 + int(index * 4 / max(1, len(translatable))),
             )
             try:
                 item["scope_text_zh"] = translate_special_issue_scope(str(item.get("scope_text", "")))
@@ -1162,7 +1459,7 @@ def refresh_special_issues(
                 item.pop("scope_translation_error", None)
             except Exception as error:  # noqa: BLE001 - source scope remains visible
                 item["scope_translation_error"] = str(error)[:240]
-    emit("正在用综合画像与逐篇论文画像计算匹配…", 52)
+    emit("正在用综合画像与逐篇论文画像计算匹配…", 55)
     profiles = build_special_issue_profiles(research_profile or {}, paper_rows)
     profile_signature = hashlib.sha256(
         json.dumps(profiles, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
@@ -1172,7 +1469,7 @@ def refresh_special_issues(
         value
         for value in verified
         if str(value.get("verification_status", "")) not in {"closed", "expired", "conflict"}
-        and str(value.get("scope_text", "")).strip()
+        and str(value.get("title", "")).strip()
     ]
     eligible_ids = {str(value.get("id", "")) for value in eligible}
     completed = 0
@@ -1180,39 +1477,70 @@ def refresh_special_issues(
         if is_cancelled():
             break
         result = deepcopy(item)
+        if backfill_only and not _special_issue_needs_ai_backfill(result):
+            matched.append(result)
+            continue
         if str(item.get("id", "")) in eligible_ids:
             completed += 1
-            scope_signature = hashlib.sha256(str(item.get("scope_text", "")).encode("utf-8")).hexdigest()
+            scope_signature = hashlib.sha256(
+                json.dumps(
+                    {
+                        key: item.get(key)
+                        for key in ("title", "journal", "publisher", "keywords", "scope_text", "scope_status", "deadline", "rolling")
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
             previous_match = result.get("match") if isinstance(result.get("match"), dict) else None
+            requires_v13_axes = str(result.get("scoring_version", "")).startswith("special-issue-dual-axis-13")
+            stored_ai_payload = (
+                previous_match.get("ai_axis_payload")
+                if isinstance(previous_match, dict) and isinstance(previous_match.get("ai_axis_payload"), dict)
+                else result.get("ai_axis_payload")
+            )
             reusable = (
                 previous_match is not None
                 and str(result.get("match_profile_signature", "")) == profile_signature
                 and str(result.get("match_scope_signature", "")) == scope_signature
                 and str(previous_match.get("status", "")) not in {"ai_unavailable", "awaiting_scope"}
+                and (not requires_v13_axes or _complete_special_issue_ai_axes(stored_ai_payload))
             )
 
             def match_progress(message: str, value: int = 0, *, _position=completed) -> None:
-                overall = 52 + int(((_position - 1) + max(0, min(100, value)) / 100) * 42 / max(1, len(eligible)))
+                overall = 55 + int(((_position - 1) + max(0, min(100, value)) / 100) * 39 / max(1, len(eligible)))
                 emit(message, overall)
 
             if reusable:
                 match_progress("画像与征稿未变化，已复用上次 AI 评分", 100)
             else:
                 try:
-                    result["match"] = match_special_issue(
+                    refreshed_match = match_special_issue(
                         item,
                         profiles,
                         ai_matcher=ai_matcher,
                         progress=match_progress,
                     )
-                    result["match_profile_signature"] = profile_signature
-                    result["match_scope_signature"] = scope_signature
-                    result.pop("match_error", None)
+                    if str(refreshed_match.get("status", "")).casefold() in {"ai_unavailable", "invalid_response"}:
+                        result["ai_review_status"] = "failed"
+                        result["ai_review_error"] = str(refreshed_match.get("reason", "AI 双轴评分暂不可用"))[:240]
+                        if previous_match is None:
+                            result["match"] = refreshed_match
+                    else:
+                        result["match"] = refreshed_match
+                        result["match_profile_signature"] = profile_signature
+                        result["match_scope_signature"] = scope_signature
+                        result["ai_review_status"] = "success"
+                        result.pop("ai_review_error", None)
+                        result.pop("match_error", None)
                 except Exception as error:  # noqa: BLE001 - preserve the last successful match
                     result["match_error"] = str(error)[:240]
+                    result["ai_review_status"] = "failed"
+                    result["ai_review_error"] = str(error)[:240]
                     if not isinstance(result.get("match"), dict):
                         result["match"] = {
-                            "score": 0,
+                            "score": None,
                             "formal": False,
                             "status": "ai_unavailable",
                             "reason": "AI 匹配暂不可用，已保留征稿并等待下次重试。",
@@ -1220,29 +1548,58 @@ def refresh_special_issues(
                         }
         elif not isinstance(result.get("match"), dict):
             result["match"] = {
-                "score": 0,
+                "score": None,
                 "formal": False,
                 "status": "awaiting_scope" if not str(result.get("scope_text", "")).strip() else "not_admitted",
                 "reason": "等待完整征稿范围或官网核验。",
                 "matched_papers": [],
             }
         current_match = result.get("match") if isinstance(result.get("match"), dict) else None
-        if current_match is not None and str(result.get("scope_text", "")).strip():
+        if current_match is not None and isinstance(current_match.get("ai_axis_payload"), dict):
+            result["ai_axis_payload"] = deepcopy(current_match["ai_axis_payload"])
+        if current_match is not None and str(result.get("title", "")).strip():
+            raw_match_score = current_match.get("raw_score", current_match.get("score"))
             try:
-                base_score = int(current_match.get("raw_score", current_match.get("score", 0)) or 0)
+                base_score = int(raw_match_score) if raw_match_score is not None else None
             except (TypeError, ValueError):
-                base_score = 0
-            rank_score, publisher_multiplier = apply_publisher_priority(
-                base_score, result.get("publisher", "")
-            )
-            current_match["raw_score"] = base_score
-            current_match["score"] = base_score
-            current_match["rank_score"] = rank_score
-            current_match["publisher_multiplier"] = publisher_multiplier
+                base_score = None
+            if base_score is None:
+                current_match["raw_score"] = None
+                current_match["score"] = None
+                current_match["rank_score"] = None
+                current_match["publisher_multiplier"] = None
+            else:
+                rank_score, publisher_multiplier = apply_publisher_priority(
+                    base_score, result.get("publisher", "")
+                )
+                current_match["raw_score"] = base_score
+                current_match["score"] = base_score
+                current_match["rank_score"] = rank_score
+                current_match["publisher_multiplier"] = publisher_multiplier
             current_match["content_qualified"] = bool(
                 current_match.get("content_qualified", current_match.get("formal", False))
             )
             current_match["formal"] = bool(current_match.get("formal", current_match["content_qualified"]))
+        from utils.v13_policy import score_special_issue, special_issue_display_decision
+
+        local_journal = _local_journal(result, library)
+        result = score_special_issue(
+            result,
+            research_profile or {},
+            local_journal,
+            today=now.date(),
+            ai_payload=result.get("ai_axis_payload"),
+        )
+        decision = special_issue_display_decision(result, today=now.date())
+        result["candidate_state"] = decision["state"]
+        result["display_reason"] = decision["reason"]
+        result["display_missing_fields"] = decision["missing_fields"]
+        evidence = result.get("source_evidence", []) if isinstance(result.get("source_evidence"), list) else []
+        is_third_party = bool(result.get("is_aggregator")) or any(
+            bool(value.get("is_aggregator")) for value in evidence if isinstance(value, dict)
+        )
+        if is_third_party and str(result.get("verification_status", "")).casefold() != "official_verified":
+            result["verification_label"] = "官网暂未核验"
         matched.append(result)
     if is_cancelled():
         cancelled_store = normalize_special_issue_store(
@@ -1263,6 +1620,26 @@ def refresh_special_issues(
             "last_refresh_status": refresh_status,
             "source_checkpoints": source_checkpoints,
         }
+    )
+    from utils.special_issue_policy import evaluate_special_issue
+
+    priority_publishers = {"Elsevier", "Springer Nature", "Taylor & Francis", "Wiley"}
+
+    def display_sort_key(value: dict[str, Any]) -> tuple[Any, ...]:
+        decision = evaluate_special_issue(value, now=now, view="recommended")
+        visible = bool(decision.get("visible"))
+        publisher = canonical_publisher(value.get("publisher", ""))
+        priority = publisher in priority_publishers
+        tier = {"A": 0, "B": 1, "C": 2}.get(str(value.get("pyramid_level", "")), 3)
+        relevance = int(value.get("relevance_score", 0) or 0)
+        opportunity = int(value.get("opportunity_score", 0) or 0)
+        return (0 if visible else 1, 0 if priority and visible else 1, tier, -relevance, -opportunity, str(value.get("deadline", "9999-99-99")), str(value.get("title", "")).casefold())
+
+    after["items"] = sorted(after.get("items", []), key=display_sort_key)
+    recommended_count = sum(
+        bool(evaluate_special_issue(value, now=now, view="recommended").get("visible"))
+        for value in after.get("items", [])
+        if isinstance(value, dict)
     )
     notifications = build_special_issue_notifications(before, after, today=now.date())
     at = now.isoformat(timespec="seconds")
@@ -1285,7 +1662,7 @@ def refresh_special_issues(
         "stats": {
             "raw": fetched_raw,
             "discovered": len(discovered),
-            "items": len(matched),
-            "eligible": len(eligible),
+            "items": len(after.get("items", [])),
+            "eligible": recommended_count,
         },
     }

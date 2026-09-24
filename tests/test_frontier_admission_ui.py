@@ -26,8 +26,8 @@ def test_main_feed_cannot_show_rejected_pending_or_unreviewed_legacy():
     assert [r["id"] for r in page._visible_items()] == ["good"]
     page.filter_combo.setCurrentText("已读")
     assert [r["id"] for r in page._visible_items()] == ["old-read"]
-    page.filter_combo.setCurrentText("待内容复核")
-    assert {r["id"] for r in page._visible_items()} == {"pending", "legacy"}
+    assert page.filter_combo.findText("待内容复核") == -1
+    assert page.filter_combo.findText("分区待核验") == -1
     page.close()
 
 

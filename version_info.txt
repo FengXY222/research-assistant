@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(12, 2, 1, 0),
-    prodvers=(12, 2, 1, 0),
+    filevers=(13, 1, 2, 0),
+    prodvers=(13, 1, 2, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,11 +16,11 @@ VSVersionInfo(
         [
           StringStruct(u'CompanyName', u'个人科研工作台'),
           StringStruct(u'FileDescription', u'科研助手 - 个人科研工作管理工具'),
-          StringStruct(u'FileVersion', u'12.2.1'),
+          StringStruct(u'FileVersion', u'13.1.2'),
           StringStruct(u'InternalName', u'科研助手'),
           StringStruct(u'OriginalFilename', u'科研助手.exe'),
           StringStruct(u'ProductName', u'科研助手'),
-          StringStruct(u'ProductVersion', u'12.2.1')
+          StringStruct(u'ProductVersion', u'13.1.2')
         ]
       )
     ]),

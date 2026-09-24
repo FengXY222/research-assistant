@@ -30,6 +30,24 @@ def page(deadline='30 June 2027', closed=False):
     <p>Submission deadline: {deadline}</p>{'<p>Submissions closed</p>' if closed else ''}</main>'''
 
 
+def test_selected_publisher_verification_uses_read_only_fallback_after_direct_block(monkeypatch):
+    requested = []
+
+    def fetch(url):
+        requested.append(url)
+        if url.startswith('https://r.jina.ai/http://www.sciencedirect.com/'):
+            return page()
+        raise OSError('HTTP 403')
+
+    monkeypatch.setattr(service, '_request_public_page', fetch)
+    value = service._fetch_official_page('https://www.sciencedirect.com/special-issue/42/soil')
+    assert 'Soil carbon protection' in value
+    assert requested == [
+        'https://www.sciencedirect.com/special-issue/42/soil',
+        'https://r.jina.ai/http://www.sciencedirect.com/special-issue/42/soil',
+    ]
+
+
 def test_disjoint_issns_never_borrow_near_name_metadata():
     item = raw(journal='Soil Science', issns=['1111-1111'])
     library = [{'id': 'wrong', 'name': 'Soil Science Society of America Journal', 'issn': '2222-2222', 'jcr': {'quartile': 'Q1'}}]

@@ -2,7 +2,7 @@
 
 import json
 import hashlib
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -56,7 +56,7 @@ def test_partial_failure_preserves_results_and_distinguishes_successful_empty():
     assert empty.status == "success" and empty == []
 
 
-def test_access_challenge_does_not_trigger_alternate_transport_or_proxy():
+def test_access_challenge_tries_the_explicit_elsevier_reader_fallback():
     requested = []
     def fetch(url):
         requested.append(url)
@@ -64,7 +64,50 @@ def test_access_challenge_does_not_trigger_alternate_transport_or_proxy():
     result = sources.ElsevierCallsSource(fetcher=fetch).fetch(since=SINCE)
     assert result == []
     assert result.status == "failed"
-    assert requested == ["https://www.sciencedirect.com/browse/calls-for-papers"]
+    assert requested == [
+        "https://www.sciencedirect.com/browse/calls-for-papers",
+        sources.ElsevierCallsSource.reader_url,
+    ]
+
+
+def test_elsevier_reader_keeps_the_call_detail_url_and_does_not_absorb_neighbor_scope():
+    reader = """
+    Browse 2 calls for papers for special issues
+    [First soil carbon call](https://www.sciencedirect.com/special-issue/101/soil-carbon)
+    Guest editors: A. Researcher
+    Geoderma - Impact Factor 6.1 - CiteScore 12.4
+    Submission deadline: 30 June 2027
+    [Unrelated cancer call](https://www.sciencedirect.com/special-issue/202/cancer)
+    Guest editors: B. Researcher
+    Cancer Letters - Impact Factor 8.1 - CiteScore 15.0
+    Submission deadline: 31 July 2027
+    """
+    rows = sources.ElsevierCallsSource._reader_records(
+        reader, "https://www.sciencedirect.com/browse/calls-for-papers"
+    )
+    assert [row["title"] for row in rows] == ["First soil carbon call", "Unrelated cancer call"]
+    assert rows[0]["official_url"].endswith("/special-issue/101/soil-carbon")
+    assert "cancer" not in rows[0]["scope_text"].casefold()
+
+
+def test_wiley_uses_read_only_listing_when_all_direct_call_paths_are_blocked():
+    requested = []
+
+    def fetch(url):
+        requested.append(url)
+        if "/works?" in url:
+            return '{"group_by":[{"key":"https://openalex.org/S123","key_display_name":"Soil Research","count":12}]}'
+        if "/sources?" in url:
+            return '{"results":[{"id":"https://openalex.org/S123","display_name":"Soil Research","type":"journal","host_organization_name":"Wiley","homepage_url":"https://onlinelibrary.wiley.com/journal/12345678","issn_l":"1234-5678"}]}'
+        if "r.jina.ai" in url:
+            return "[Soil carbon special issue](https://onlinelibrary.wiley.com/doi/toc/10.1111/soil)\nSubmission deadline: 30 June 2027"
+        raise OSError("HTTP 403")
+
+    rows = sources.WileyCallsSource(fetcher=fetch).fetch(since=SINCE, keywords=["soil carbon"])
+    assert len(rows) == 1
+    assert rows[0]["official_url"] == "https://onlinelibrary.wiley.com/doi/toc/10.1111/soil"
+    assert rows[0]["is_aggregator"] is True
+    assert any("r.jina.ai/http://onlinelibrary.wiley.com/" in url for url in requested)
 
 
 def test_elsevier_preserves_source_identity_dates_and_identity_query_parameters():
@@ -109,7 +152,10 @@ def test_wiley_listing_follows_bounded_same_origin_pagination():
         if "page=2" in url:
             return fixture("wiley.html").replace("soil.carbon?edition=2", "soil.carbon?edition=3").replace('<a rel="next" href="?page=2">Next</a>', "")
         return fixture("wiley.html")
-    rows = sources.WileyCallsSource(fetcher=fetch).fetch(since=SINCE)
+    rows = sources.WileyCallsSource(
+        fetcher=fetch,
+        urls=["https://onlinelibrary.wiley.com/page/journal/12345678/homepage/call_for_papers.html"],
+    ).fetch(since=SINCE)
     assert len(rows) == 2
     assert any("page=2" in url for url in requested)
     assert all(row["scope_is_complete"] is False for row in rows)
@@ -133,7 +179,10 @@ def test_invalid_api_json_is_failure_not_empty_success():
 
 def test_empty_candidate_url_never_becomes_the_listing_url():
     payload = json.dumps({"name": "Soil Carbon Collection", "dateExpires": "2027-06-30"})
-    row = sources.WileyCallsSource(fetcher=lambda url: payload).fetch(since=SINCE)[0]
+    row = sources.WileyCallsSource(
+        fetcher=lambda url: payload,
+        urls=["https://onlinelibrary.wiley.com/page/journal/12345678/homepage/call_for_papers.html"],
+    ).fetch(since=SINCE)[0]
     assert row["official_url"] == ""
 
 
@@ -148,7 +197,12 @@ def test_elsevier_pagination_keeps_a_later_call_and_records_raw_response_digest(
 
 @pytest.mark.parametrize("source_type", [sources.ElsevierCallsSource, sources.SpringerCollectionsSource, sources.WileyCallsSource])
 def test_unrecognized_publisher_response_is_parse_failure(source_type):
-    result = source_type(fetcher=lambda url: "<html><title>Maintenance</title></html>").fetch(since=SINCE)
+    options = (
+        {"urls": ["https://onlinelibrary.wiley.com/page/journal/12345678/homepage/call_for_papers.html"]}
+        if source_type is sources.WileyCallsSource
+        else {}
+    )
+    result = source_type(fetcher=lambda url: "<html><title>Maintenance</title></html>", **options).fetch(since=SINCE)
     assert result.status == "failed"
     assert result.errors[0]["stage"] == "parse"
 
@@ -213,7 +267,10 @@ def test_query_rotation_gives_late_research_branches_a_discovery_opportunity():
 
 def test_cross_origin_pagination_is_not_fetched_and_reports_gap():
     text = fixture("wiley.html").replace('href="?page=2"', 'href="https://untrusted.example/collect"')
-    result = sources.WileyCallsSource(fetcher=lambda url: text).fetch(since=SINCE)
+    result = sources.WileyCallsSource(
+        fetcher=lambda url: text,
+        urls=["https://onlinelibrary.wiley.com/page/journal/12345678/homepage/call_for_papers.html"],
+    ).fetch(since=SINCE)
     assert len(result) == 1
     assert result.status == "partial"
     assert result.errors[0]["stage"] == "pagination"
@@ -225,3 +282,81 @@ def test_aggregator_original_time_is_extracted_without_using_deadline_time():
     assert row["published_at"] == "2026-08-01T09:00:00Z"
     assert row["updated_at"] == ""
     assert row["source_record_id"] == "99"
+
+
+def test_cfp_shards_are_current_next_two_then_rolling_and_commit_individually():
+    requested = []
+    committed = []
+    index = json.dumps(
+        {
+            "months": [
+                {"name": "rolling", "file": "rolling.json"},
+                {"name": "2026-12", "file": "2026-12.json"},
+                {"name": "2026-11", "file": "2026-11.json"},
+                {"name": "2026-10", "file": "2026-10.json"},
+                {"name": "2026-09", "file": "2026-09.json"},
+            ]
+        }
+    )
+
+    def fetch(url):
+        requested.append(url)
+        if url.endswith("index.json"):
+            return index
+        month = Path(url).stem
+        return json.dumps(
+            [{"id": month, "t": f"Soil carbon {month}", "d": "2027-06-30", "x": "soil carbon"}]
+        )
+
+    result = sources.JournalCfpDdlSource(fetcher=fetch).fetch(
+        since=SINCE,
+        today=date(2026, 9, 17),
+        keywords=["soil carbon"],
+        on_shard=lambda **payload: committed.append(payload),
+    )
+    assert [value["shard_id"] for value in committed] == ["2026-09", "2026-10", "2026-11", "rolling"]
+    assert len(result) == 4
+    assert not any("2026-12.json" in url for url in requested)
+
+
+def test_cfp_retry_skips_successful_shards_and_can_cancel_inside_one_shard():
+    index = json.dumps(
+        {"months": [
+            {"name": "2026-09", "file": "2026-09.json"},
+            {"name": "2026-10", "file": "2026-10.json"},
+            {"name": "2026-11", "file": "2026-11.json"},
+            {"name": "rolling", "file": "rolling.json"},
+        ]}
+    )
+    requested = []
+    checks = {"count": 0}
+
+    def fetch(url):
+        requested.append(url)
+        if url.endswith("index.json"):
+            return index
+        return json.dumps(
+            [
+                {"id": "one", "t": "Soil carbon one", "d": "2027-06-30", "x": "soil carbon"},
+                {"id": "two", "t": "Soil carbon two", "d": "2027-06-30", "x": "soil carbon"},
+            ]
+        )
+
+    def cancelled():
+        checks["count"] += 1
+        return checks["count"] >= 4
+
+    committed = []
+    result = sources.JournalCfpDdlSource(fetcher=fetch).fetch(
+        since=SINCE,
+        today=date(2026, 9, 17),
+        keywords=["soil carbon"],
+        shard_checkpoints={"2026-09": {"status": "success"}, "2026-10": {"status": "failed"}, "2026-11": {"status": "success"}, "rolling": {"status": "success"}},
+        retry_failed_only=True,
+        cancelled=cancelled,
+        on_shard=lambda **payload: committed.append(payload),
+    )
+    assert not any("2026-09.json" in url or "2026-11.json" in url or "rolling.json" in url for url in requested)
+    assert any("2026-10.json" in url for url in requested)
+    assert committed[-1]["status"] == "cancelled"
+    assert result.status == "partial"

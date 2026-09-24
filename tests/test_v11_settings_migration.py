@@ -47,10 +47,9 @@ class V11SettingsTests(TestCase):
         self.assertTrue(normalized["widget_window"]["locked"])
         self.assertEqual(normalized["journal_import_shortcut"]["sequence"], "Ctrl+Alt+J")
 
-    def test_new_theme_id_survives_settings_normalization(self) -> None:
-        """A selectable non-monochrome theme must persist across restart."""
+    def test_retired_theme_id_migrates_to_the_single_theme(self) -> None:
         normalized = normalize_app_settings(
             {"appearance": {"theme_id": "night_coral", "density": "comfortable"}}
         )
 
-        self.assertEqual(normalized["appearance"]["theme_id"], "night_coral")
+        self.assertEqual(normalized["appearance"]["theme_id"], "fog_teal")

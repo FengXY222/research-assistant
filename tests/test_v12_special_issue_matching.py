@@ -131,17 +131,24 @@ def test_ai_contextual_exclusion_can_remove_formal_status_without_changing_score
     assert result["status"] == "out_of_scope"
 
 
-def test_missing_full_scope_waits_instead_of_fabricating_a_score() -> None:
+def test_missing_full_scope_uses_labelled_metadata_inference() -> None:
     called = []
+
+    def matcher(item, *_args):
+        called.append(item)
+        return _response(item)
+
     result = match_special_issue(
-        _issue(scope_text=""),
+        _issue(scope_text="", scope_is_complete=False, scope_status="missing"),
         _profiles(),
-        ai_matcher=lambda *_args: called.append(True),
+        ai_matcher=matcher,
     )
 
-    assert called == []
-    assert result["status"] == "awaiting_scope"
-    assert result["formal"] is False
+    assert called and called[0]["assessment_basis"] == "metadata_inference"
+    assert "Metadata-only thematic evidence" in called[0]["scope_paragraphs"][0]["text"]
+    assert result["assessment_basis"] == "metadata_inference"
+    assert result["scope_complete"] is False
+    assert result["score"] == 88
 
 
 def test_ai_contract_sends_complete_scope_and_keeps_independent_paper_scores() -> None:

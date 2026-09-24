@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from ui.dialogs import confirm_delete, show_undo_toast
 from ui.ai_progress import AiProgressPanel
 from ui.journal_selection_dialog import JournalSelectionDialog
+from ui.page_kit import PageHeader
 from ui.reorder import OrderDragHandle, ReorderableColumn
 from ui.workflow_dialogs import PaperActionCenterDialog
 from utils.ai_service import DeepSeekConfigurationError, fill_paper_record_with_ai, is_deepseek_ready
@@ -115,6 +116,11 @@ class FileAttachmentRow(QFrame):
         kind = QLabel("文件夹" if item.get("kind") == "folder" else "文件")
         kind.setObjectName("fileAttachmentKind")
         root.addWidget(kind)
+        ai_access = QCheckBox("AI 可读")
+        ai_access.setChecked(bool(item.get("ai_access", True)))
+        ai_access.setToolTip("关闭后，AI 任务不会读取这个文件")
+        ai_access.toggled.connect(lambda checked: self.item.__setitem__("ai_access", bool(checked)))
+        root.addWidget(ai_access)
         remove = QPushButton("×")
         remove.setObjectName("dangerButton")
         remove.setToolTip("移除关联，不删除本地文件")
@@ -503,6 +509,9 @@ class PaperDialog(QDialog):
         self.summary_edit.setPlaceholderText("研究对象、问题、方法或目标（用于 AI 补全和为论文选刊，可选）")
         self.summary_edit.setFixedHeight(66)
         form.addRow("研究摘要", self.summary_edit)
+        self.ai_material_access = QCheckBox("允许 AI 在相关任务中读取这篇论文的附件、投稿记录和审稿备注")
+        self.ai_material_access.setChecked(True)
+        form.addRow("本地资料权限", self.ai_material_access)
         root.addLayout(form)
 
         ai_row = QHBoxLayout()
@@ -688,6 +697,7 @@ class PaperDialog(QDialog):
         self.title_edit.setCursorPosition(0)
         self.keywords_edit.setText(", ".join(str(item) for item in paper.get("keywords", []) if str(item).strip()))
         self.summary_edit.setPlainText(str(paper.get("summary", "")))
+        self.ai_material_access.setChecked(bool(paper.get("ai_material_access", True)))
         self._files = [dict(item) for item in paper.get("files", []) if isinstance(item, dict)]
         self._render_files()
         journals = paper.get("journals", [])
@@ -708,14 +718,14 @@ class PaperDialog(QDialog):
         paths, _ = QFileDialog.getOpenFileNames(self, "关联论文文件")
         for path in paths:
             self._files.append(
-                {"id": uuid4().hex, "name": Path(path).name, "path": path, "kind": "file"}
+                {"id": uuid4().hex, "name": Path(path).name, "path": path, "kind": "file", "ai_access": True}
             )
         self._render_files()
 
     def _add_folder(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "关联论文文件夹")
         if path:
-            self._files.append({"id": uuid4().hex, "name": Path(path).name or path, "path": path, "kind": "folder"})
+            self._files.append({"id": uuid4().hex, "name": Path(path).name or path, "path": path, "kind": "folder", "ai_access": True})
             self._render_files()
 
     def _render_files(self) -> None:
@@ -825,6 +835,7 @@ class PaperDialog(QDialog):
             "title": self.title_edit.text().strip(),
             "keywords": keywords,
             "summary": self.summary_edit.toPlainText().strip(),
+            "ai_material_access": self.ai_material_access.isChecked(),
             "files": self._files,
             "created_at": str(self._paper.get("created_at", "")) or date.today().isoformat(),
             "journals": [editor.values() for editor in self._journal_editors],
@@ -1238,33 +1249,22 @@ class PaperPage(QWidget):
         root.setContentsMargins(14, 14, 14, 12)
         root.setSpacing(8)
 
-        heading = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title_box.setSpacing(3)
-        title = QLabel("论文投稿记录")
-        title.setObjectName("paperPageTitle")
-        subtitle = QLabel("一篇论文，完整保留所有期刊经历")
-        subtitle.setObjectName("dateLabel")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-        heading.addLayout(title_box)
-        heading.addStretch()
+        header = PageHeader("论文投稿记录", accent="papers")
         self.archive_corner_button = QToolButton()
         self.archive_corner_button.setObjectName("archiveCornerButton")
         self.archive_corner_button.setText("拒稿归档 0")
         self.archive_corner_button.setToolTip("查看已归档的拒稿期刊")
         self.archive_corner_button.clicked.connect(self._show_archive_dialog)
-        heading.addWidget(self.archive_corner_button, alignment=Qt.AlignmentFlag.AlignBottom)
-        choose = QPushButton("为论文选刊")
-        choose.setObjectName("subtleButton")
-        choose.setToolTip("综合期刊优先级、关键词、JCR、个人经历和反馈，为已有论文挑选目标期刊")
-        choose.clicked.connect(self._choose_journal)
-        heading.addWidget(choose, alignment=Qt.AlignmentFlag.AlignBottom)
-        add = QPushButton("＋ 新增论文")
-        add.setObjectName("primaryButton")
-        add.clicked.connect(self._add_paper)
-        heading.addWidget(add, alignment=Qt.AlignmentFlag.AlignBottom)
-        root.addLayout(heading)
+        self.archive_corner_button.hide()
+        header.add_primary_action(
+            "为论文选刊",
+            self._choose_journal,
+            tooltip="综合期刊优先级、关键词、JCR、个人经历和反馈，为已有论文挑选目标期刊",
+        )
+        menu = header.add_overflow_menu("投稿记录更多操作")
+        self.archive_menu_action = menu.add_action("拒稿归档 0", self._show_archive_dialog)
+        menu.add_action("新增论文", self._add_paper)
+        root.addWidget(header)
 
         toolbar = QHBoxLayout()
         self.search_edit = QLineEdit()
@@ -1401,6 +1401,7 @@ class PaperPage(QWidget):
         self.rejection_archive = load_rejection_archive()
         count = len(self.rejection_archive)
         self.archive_corner_button.setText(f"拒稿归档 {count}")
+        self.archive_menu_action.setText(f"拒稿归档 {count}")
         self.archive_corner_button.setToolTip(
             "查看已归档的拒稿期刊" if count else "暂无拒稿归档；单个期刊改为“拒稿”后会保存在这里"
         )

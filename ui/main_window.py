@@ -6,7 +6,7 @@ import sys
 from datetime import date, timedelta
 from uuid import uuid4
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QParallelAnimationGroup, QPropertyAnimation, Property, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QParallelAnimationGroup, QPropertyAnimation, Property, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QCursor, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QStackedWidget,
     QStyle,
     QStyleOptionButton,
     QStylePainter,
@@ -38,7 +37,8 @@ from ui.special_issue_dialog import SpecialIssueDialog
 from ui.achievements_page import AchievementsPage
 from ui.notes_page import NotesPage
 from ui.reminder_dialog import ReadySubmissionDialog, SubmissionReminderDialog
-from ui.settings_dialog import SettingsDialog
+from ui.settings_center import SettingsCenterDialog
+from ui.icons import lucide_icon
 from ui.quick_capture_dialog import QuickCaptureDialog
 from ui.theme import apply_application_theme
 from ui.workbench_shell import WorkbenchShell
@@ -62,7 +62,7 @@ from utils.special_issue_repository import (
     add_special_issue_to_submission_path,
     associate_special_issue,
     create_special_issue_preparation_task,
-    load_special_issue_store,
+    load_special_issue_overview,
     mark_special_issue_notifications_sent,
     set_special_issue_scope_note,
     set_special_issue_status,
@@ -116,10 +116,10 @@ class DragBar(QFrame):
 
 
 NAVIGATION_ITEMS = (
-    ("home", "home", "HOME"),
-    ("work", "work", "WORK"),
-    ("papers", "papers", "PAPERS"),
-    ("library", "library", "LIBRARY"),
+    ("home", "home", "概览", "home"),
+    ("work", "work", "工作", "list-todo"),
+    ("papers", "papers", "论文", "file-text"),
+    ("library", "library", "文献", "library-big"),
 )
 
 LEGACY_PAGE_ROUTES = {
@@ -134,28 +134,12 @@ LEGACY_PAGE_ROUTES = {
 
 
 class VerticalNavButton(QPushButton):
-    """A compact sidebar button with a true vertical label."""
+    """Compatibility name for the v13.1 horizontal icon-and-Chinese nav."""
 
     def __init__(self, text: str, page_index: str, parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
         self.page_index = page_index
         self.setToolTip("切换页面")
-
-    def paintEvent(self, event) -> None:
-        painter = QStylePainter(self)
-        option = QStyleOptionButton()
-        self.initStyleOption(option)
-        text = option.text
-        option.text = ""
-        painter.drawControl(QStyle.ControlElement.CE_PushButton, option)
-
-        painter.save()
-        painter.translate(0, self.height())
-        painter.rotate(-90)
-        option.rect = QRect(0, 0, self.height(), self.width())
-        option.text = text
-        painter.drawControl(QStyle.ControlElement.CE_PushButtonLabel, option)
-        painter.restore()
 
 
 class AutoHideSidebar(QFrame):
@@ -243,7 +227,7 @@ class MainWindow(QMainWindow):
         self._reminder_dialog: QDialog | None = None
         self._special_issue_dialog: SpecialIssueDialog | None = None
         self._sidebar_pinned = bool(self.settings.get("sidebar_pinned", False))
-        self._sidebar_full_width = 52
+        self._sidebar_full_width = 82
         self._sidebar_hidden_width = 6
         self._content_collapsed = False
         self._content_restore_width = max(400, self.width())
@@ -256,6 +240,8 @@ class MainWindow(QMainWindow):
         self._home_idle_timer.setInterval(60 * 1000)
         self._home_idle_timer.timeout.connect(self._return_home_after_idle)
         self._hide_to_tray_queued = False
+        self._exit_requested = False
+        self._dirty_pages: set[str] = set()
         self._build_ui()
         self._sidebar_expanded = True
         self._sidebar_animation = QParallelAnimationGroup(self)
@@ -308,10 +294,10 @@ class MainWindow(QMainWindow):
         self.nav_layout = QVBoxLayout(self.nav_container)
         self.nav_layout.setContentsMargins(0, 0, 0, 0)
         self.nav_layout.setSpacing(5)
-        for _key, route, text in NAVIGATION_ITEMS:
-            button = self._make_nav_button(text, route)
+        for _key, route, text, icon_name in NAVIGATION_ITEMS:
+            button = self._make_nav_button(text, route, icon_name)
             button.clicked.connect(lambda _checked=False, value=route: self.navigate(value))
-            button.setMinimumHeight(66)
+            button.setMinimumHeight(42)
             self.nav_layout.addWidget(button)
         self.nav_layout.addStretch()
         self.sidebar_pin_button = QPushButton("固定")
@@ -412,19 +398,16 @@ class MainWindow(QMainWindow):
         self.home_page.open_notes.connect(lambda: self.navigate("notes"))
         self.home_page.open_frontier.connect(lambda: self.navigate("frontier"))
         self.todo_page.changed.connect(self.home_page.refresh)
-        self.paper_page.changed.connect(self.home_page.refresh)
-        self.paper_page.changed.connect(self._check_submission_reminders)
-        self.paper_page.changed.connect(self.journal_page.reload)
-        self.paper_page.changed.connect(self.achievements_page.reload)
+        self.paper_page.changed.connect(self._on_paper_data_changed)
         self.notes_page.changed.connect(self.home_page.refresh)
-        self.journal_page.changed.connect(self.home_page.refresh)
-        self.journal_page.changed.connect(self.paper_page.reload)
-        self.journal_page.changed.connect(self.frontier_page.reload)
+        self.journal_page.changed.connect(self._on_journal_data_changed)
         self.frontier_page.changed.connect(self.home_page.refresh)
         self.achievements_page.changed.connect(self.home_page.refresh)
         self.achievements_page.profile_update_requested.connect(self._update_profile_from_achievements)
         self.frontier_page.daily_ready.connect(self._show_frontier_notification)
         self.frontier_page.open_journal_library.connect(lambda: self.navigate("journals"))
+        self.frontier_page.settings_center_requested.connect(self._open_settings)
+        self.journal_page.settings_center_requested.connect(self._open_settings)
         self.special_issue_page.open_workbench.connect(self._open_special_issue_workbench)
         self.special_issue_page.refresh_progress.connect(self._show_special_issue_progress)
         self.special_issue_page.refresh_completed.connect(self._special_issue_refresh_completed)
@@ -433,8 +416,10 @@ class MainWindow(QMainWindow):
         self.shell_layout.addWidget(self.content_panel, 1)
         self.navigate("home")
 
-    def _make_nav_button(self, text: str, page_index: str) -> VerticalNavButton:
+    def _make_nav_button(self, text: str, page_index: str, icon_name: str = "") -> VerticalNavButton:
         button = VerticalNavButton(text, page_index)
+        button.setIcon(lucide_icon(icon_name))
+        button.setIconSize(QSize(17, 17))
         button.setCheckable(True)
         button.setObjectName("navButton")
         button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -509,6 +494,27 @@ class MainWindow(QMainWindow):
         """Navigate legacy callers and new workbench controls through one registry."""
         self._expand_main_content()
         target = self.workbench_shell.navigate(route, anchor)
+        page_key = {
+            ("work", "tasks"): "todo",
+            ("work", "notes"): "notes",
+            ("papers", "submissions"): "papers",
+            ("papers", "results"): "achievements",
+            ("library", "journals"): "journals",
+            ("library", "frontier"): "frontier",
+            ("library", "special_issues"): "special_issues",
+        }.get((target.workbench, target.anchor))
+        if page_key in self._dirty_pages:
+            page = {
+                "todo": self.todo_page,
+                "notes": self.notes_page,
+                "papers": self.paper_page,
+                "achievements": self.achievements_page,
+                "journals": self.journal_page,
+                "frontier": self.frontier_page,
+                "special_issues": self.special_issue_page,
+            }[page_key]
+            page.reload()
+            self._dirty_pages.discard(page_key)
         for button in self._nav_buttons:
             button.setChecked(button.page_index == target.workbench)
         if target.workbench == "home":
@@ -516,11 +522,24 @@ class MainWindow(QMainWindow):
         else:
             self._home_idle_timer.start()
 
+    def _on_paper_data_changed(self) -> None:
+        """Refresh dependent pages when they are next opened, not inline."""
+
+        self.home_page.refresh()
+        self._check_submission_reminders()
+        self._dirty_pages.update({"journals", "achievements"})
+
+    def _on_journal_data_changed(self) -> None:
+        """Keep journal edits responsive while preserving dependent results."""
+
+        self.home_page.refresh()
+        self._dirty_pages.update({"papers", "frontier"})
+
     def _open_special_issue_workbench(self, selected_issue_id: str = "") -> None:
         """Open or focus the one large workbench without changing widget mode."""
         if selected_issue_id:
             try:
-                current_store = load_special_issue_store()
+                current_store = load_special_issue_overview()
                 current_item = next(
                     (value for value in current_store.get("items", []) if str(value.get("id", "")) == str(selected_issue_id)),
                     None,
@@ -530,7 +549,7 @@ class MainWindow(QMainWindow):
                 self._record_special_issue_signal(selected_issue_id, "detail_open")
             except Exception:
                 pass
-        store = load_special_issue_store()
+        store = load_special_issue_overview()
         if self._special_issue_dialog is not None:
             try:
                 self._special_issue_dialog.reload_data(store, store.get("items", []), load_papers())
@@ -556,7 +575,7 @@ class MainWindow(QMainWindow):
         dialog.show()
 
     def _reload_special_issue_surfaces(self, selected_issue_id: str = "", message: str = "") -> None:
-        store = load_special_issue_store()
+        store = load_special_issue_overview()
         self.special_issue_page.reload()
         dialog = self._special_issue_dialog
         if dialog is not None:
@@ -587,8 +606,7 @@ class MainWindow(QMainWindow):
     def _add_special_issue_path(self, issue_id: str, paper_id: str) -> None:
         def action() -> None:
             add_special_issue_to_submission_path(issue_id, paper_id)
-            self.paper_page.reload()
-            self.journal_page.reload()
+            self._dirty_pages.update({"papers", "journals"})
             self.home_page.refresh()
 
         self._run_special_issue_action(issue_id, "正在入库并创建投稿候选…", action)
@@ -596,14 +614,14 @@ class MainWindow(QMainWindow):
     def _add_special_issue_journal(self, issue_id: str) -> None:
         def action() -> None:
             add_special_issue_journal_to_library(issue_id)
-            self.journal_page.reload()
+            self._dirty_pages.add("journals")
 
         self._run_special_issue_action(issue_id, "正在加入期刊库…", action)
 
     def _create_special_issue_task(self, issue_id: str, paper_id: str) -> None:
         def action() -> None:
             create_special_issue_preparation_task(issue_id, paper_id)
-            self.todo_page.reload()
+            self._dirty_pages.add("todo")
             self.home_page.refresh()
 
         self._run_special_issue_action(issue_id, "正在创建准备任务…", action)
@@ -630,7 +648,7 @@ class MainWindow(QMainWindow):
             from utils.research_profile_repository import load_research_profile, save_research_profile
             from utils.research_signal_service import record_signal
 
-            store = load_special_issue_store()
+            store = load_special_issue_overview()
             issue = next(
                 (value for value in store.get("items", []) if str(value.get("id", "")) == str(issue_id)),
                 None,
@@ -948,14 +966,21 @@ class MainWindow(QMainWindow):
         self._save_settings()
         self.lock_button.setToolTip("窗口已固定，点击解除固定" if locked else "固定窗口位置和大小 / 解除固定")
 
-    def _open_settings(self) -> None:
-        dialog = SettingsDialog(self.settings, self)
+    def _open_settings(self, section: str = "general") -> None:
+        if isinstance(section, bool):
+            section = "general"
+        dialog = SettingsCenterDialog(
+            self.settings,
+            self,
+            initial_section=str(section),
+        )
         dialog.settings_saved.connect(self._apply_settings)
         dialog.theme_previewed.connect(self._apply_theme)
         dialog.theme_preview_reverted.connect(self._apply_theme)
         dialog.backup_restored.connect(self._reload_local_data)
         dialog.data_location_changed.connect(self._reload_local_data)
         dialog.exec()
+        self.frontier_page.reload()
 
     def _open_research_inbox(self) -> None:
         dialog = QuickCaptureDialog(self)
@@ -982,7 +1007,7 @@ class MainWindow(QMainWindow):
         appearance = updated.get("appearance", self.settings.get("appearance", {}))
         appearance = appearance if isinstance(appearance, dict) else {}
         self.settings["appearance"] = {
-            "theme_id": str(appearance.get("theme_id", "fog_teal")),
+            "theme_id": "fog_teal",
             "density": str(appearance.get("density", "comfortable")),
         }
         research = updated.get("research", self.settings.get("research", {}))
@@ -993,6 +1018,7 @@ class MainWindow(QMainWindow):
             if isinstance(profile, dict):
                 self.settings[profile_key] = dict(profile)
         self.settings["autostart"] = bool(updated["autostart"])
+        self.settings["close_to_tray"] = bool(updated.get("close_to_tray", False))
         self.settings["ready_submission_reminder"] = bool(updated["ready_submission_reminder"])
         self.settings["sidebar_position"] = "right" if updated.get("sidebar_position") == "right" else "left"
         self.settings["sidebar_collapse_mode"] = (
@@ -1151,7 +1177,7 @@ class MainWindow(QMainWindow):
         show_action = QAction("显示科研助手", self)
         show_action.triggered.connect(self.show_and_activate)
         exit_action = QAction("退出", self)
-        exit_action.triggered.connect(self.close)
+        exit_action.triggered.connect(self._quit_application)
         menu.addAction(show_action)
         menu.addSeparator()
         menu.addAction(exit_action)
@@ -1160,6 +1186,11 @@ class MainWindow(QMainWindow):
         self.tray_icon.setContextMenu(menu)
         self.tray_icon.activated.connect(self._tray_activated)
         self.tray_icon.show()
+
+    def _quit_application(self) -> None:
+        """Bypass close-to-tray only for the tray menu's explicit Exit."""
+        self._exit_requested = True
+        self.close()
 
     def _start_reminder_checks(self) -> None:
         self._reminder_timer = QTimer(self)
@@ -1338,7 +1369,7 @@ class MainWindow(QMainWindow):
     def start_in_tray(self) -> None:
         """Start quietly in the Windows notification area, without a taskbar button."""
         if should_hide_to_tray(self.application_mode):
-            self._hide_to_tray(notify=True)
+            self._hide_to_tray(notify=False)
         else:
             self.show_and_activate()
 
@@ -1601,276 +1632,14 @@ class MainWindow(QMainWindow):
             str(appearance.get("theme_id", "fog_teal")),
             str(appearance.get("density", "comfortable")),
         )
-        return
-        self.setStyleSheet(
-            """
-            QWidget { color: #f4f6ff; font-family: "Microsoft YaHei UI", "Microsoft YaHei"; font-size: 13px; }
-            QMainWindow { background: transparent; }
-            #windowRoot { background: rgba(7, 13, 31, 218); border-radius: 2px; }
-            #contentStack { background: rgba(7, 13, 31, 218); }
-            #sidebar { background: rgba(7, 12, 29, 205); border-right: 1px solid rgba(255,255,255,35); }
-            #topbar { background: rgba(7, 12, 29, 195); border-bottom: 1px solid rgba(255,255,255,35); }
-            #brand { color: #ffffff; font-size: 15px; font-weight: 700; }
-            #topHint, #toolbarLabel { color: rgba(255,255,255,145); font-size: 11px; }
-            #navButton { background: transparent; border: 0; border-radius: 4px; padding: 7px 5px; color: rgba(255,255,255,130); font-size: 10px; letter-spacing: 1px; }
-            #navButton:hover { background: rgba(255,255,255,28); color: #ffffff; }
-            #navButton:checked { color: #ffffff; background: rgba(255,255,255,40); }
-            #iconButton, #windowButton, #closeButton { background: transparent; border: 0; border-radius: 4px; padding: 4px 7px; color: #ffffff; font-size: 18px; }
-            #lockButton { background: transparent; border: 0; border-radius: 4px; padding: 5px 7px; color: rgba(255,255,255,180); font-size: 11px; }
-            #iconButton:hover, #windowButton:hover { background: rgba(255,255,255,35); }
-            #iconButton:checked { color: #61e6a1; background: rgba(97,230,161,25); }
-            #lockButton:hover { background: rgba(255,255,255,35); color: #ffffff; }
-            #lockButton:checked { color: #ffe36a; background: rgba(255,227,106,30); }
-            #closeButton:hover { background: rgba(255,80,80,130); }
-            QLineEdit, QDateEdit, QComboBox, QPlainTextEdit { background: rgba(255,255,255,24); color: #ffffff; border: 1px solid rgba(255,255,255,50); border-radius: 5px; padding: 7px 9px; selection-background-color: rgba(60,180,255,130); }
-            QLineEdit:focus, QDateEdit:focus, QComboBox:focus, QPlainTextEdit:focus { border-color: rgba(90,200,255,180); }
-            #primaryButton { background: #30d978; color: #07131f; border: 0; border-radius: 5px; padding: 7px 12px; font-weight: 700; }
-            #primaryButton:hover { background: #64f39c; }
-            #subtleButton { background: rgba(255,255,255,28); color: rgba(255,255,255,190); border: 0; border-radius: 5px; padding: 6px 9px; }
-            #subtleButton:hover { background: rgba(255,255,255,50); color: #ffffff; }
-            #todoList { background: transparent; border: 0; outline: 0; }
-            #todoList::item { background: rgba(255,255,255,10); border: 0; border-bottom: 1px solid rgba(255,255,255,25); padding: 2px; }
-            #todoText { color: rgba(255,255,255,235); font-size: 17px; }
-            #doneText { color: rgba(255,255,255,115); text-decoration: line-through; font-size: 17px; }
-            #todoDot, #todoYellowDot { color: #ffe451; font-size: 15px; }
-            #todoRedDot { color: #ff6f7d; font-size: 15px; }
-            #todoGreenDot { color: #61e6a1; font-size: 15px; }
-            #doneDot { color: #61e6a1; font-size: 15px; }
-            #todoMeta { color: rgba(180,210,245,155); font-size: 10px; }
-            #priorityRedTag, #priorityYellowTag, #priorityGreenTag { border-radius: 8px; padding: 3px 6px; font-size: 10px; }
-            #priorityRedTag { background: rgba(255,111,125,48); color: #ff98a1; }
-            #priorityYellowTag { background: rgba(255,214,107,48); color: #ffd66b; }
-            #priorityGreenTag { background: rgba(97,230,161,48); color: #8bf0b7; }
-            #historyToggle { background: transparent; color: rgba(210,226,250,185); border: 1px solid rgba(140,190,235,65); border-radius: 5px; padding: 6px 8px; text-align: left; }
-            #historyToggle:hover { background: rgba(255,255,255,22); color: #ffffff; }
-            #historyList { background: rgba(15,28,54,180); color: rgba(235,242,255,205); border: 1px solid rgba(140,190,235,65); border-radius: 6px; outline: 0; font-size: 11px; }
-            #historyList::item { border-bottom: 1px solid rgba(255,255,255,20); padding: 4px 8px; }
-            #quadrantOverlay { background: rgba(5, 12, 29, 247); border: 1px solid rgba(140,190,235,125); border-radius: 8px; }
-            #quadrantOverlayTitle { color: #ffffff; font-size: 18px; font-weight: 700; }
-            #quadrantOverlayHint { color: rgba(210,226,250,170); font-size: 11px; }
-            #quadrantRed, #quadrantYellow, #quadrantGreen { border-radius: 7px; }
-            #quadrantRed { background: rgba(164, 50, 67, 185); border: 1px solid rgba(255, 132, 142, 210); }
-            #quadrantYellow { background: rgba(128, 98, 27, 185); border: 1px solid rgba(255, 214, 107, 210); }
-            #quadrantGreen { background: rgba(31, 112, 75, 185); border: 1px solid rgba(105, 232, 162, 210); }
-            #quadrantHeading { color: #ffffff; font-size: 15px; font-weight: 700; }
-            #quadrantHint { color: rgba(255,255,255,205); font-size: 11px; }
-            #rowButton, #dangerButton { background: transparent; border: 0; border-radius: 4px; padding: 4px 6px; color: rgba(255,255,255,150); font-size: 14px; }
-            #rowButton:hover { background: rgba(255,255,255,35); color: #ffffff; }
-            #dangerButton { color: rgba(255,140,140,185); }
-            #dangerButton:hover { background: rgba(255,90,90,80); color: #ffffff; }
-            #emptyLabel { color: rgba(255,255,255,135); padding: 30px; }
-            #pageTitle { color: #ffffff; font-size: 36px; font-weight: 700; }
-            #paperPageTitle { color: #ffffff; font-size: 25px; font-weight: 700; }
-            #dateLabel { color: rgba(255,255,255,150); font-size: 13px; }
-            #summaryLabel { color: rgba(255,255,255,170); font-size: 27px; font-weight: 300; }
-            #overviewCard, #inspirationCard, #notesCard { background: rgba(15, 28, 54, 242); border: 1px solid rgba(140,190,235,85); border-radius: 7px; }
-            #cardHeading { color: #ffffff; font-size: 13px; font-weight: 600; }
-            #cardHint { color: rgba(180,210,245,155); font-size: 10px; }
-            #metricValue { color: #ffffff; font-size: 18px; font-weight: 600; }
-            #cardLink { background: transparent; border: 0; padding: 1px 0; color: #80d8ff; font-size: 11px; }
-            #cardLink:hover { color: #ffffff; }
-            #nodeText { color: rgba(255,255,255,195); font-size: 12px; }
-            #nodeRed { color: #ff838b; font-size: 12px; font-weight: 600; }
-            #nodeYellow { color: #ffd66b; font-size: 12px; font-weight: 600; }
-            #nodeGreen { color: #69e8a2; font-size: 12px; font-weight: 600; }
-            #inspirationText { color: rgba(255,255,255,210); font-size: 12px; }
-            #inspirationBullet { color: #b9d9ff; font-size: 14px; }
-            #miniAddButton, #inspirationRemove { background: transparent; border: 0; color: rgba(255,255,255,170); padding: 3px 6px; }
-            #miniAddButton:hover, #inspirationRemove:hover { background: rgba(255,255,255,35); color: #ffffff; }
-            #readingRow { background: rgba(24, 42, 75, 245); border: 1px solid rgba(140,190,235,75); border-radius: 6px; }
-            #readingTitle { color: #ffffff; font-size: 14px; font-weight: 600; }
-            #readingUnread, #readingDone { border-radius: 9px; padding: 4px 8px; font-size: 11px; }
-            #readingUnread { background: rgba(255,214,107,45); color: #ffd66b; }
-            #readingDone { background: rgba(105,232,162,45); color: #69e8a2; }
-            #readingReason { color: rgba(255,255,255,165); font-size: 11px; }
-            #sectionLabel, #formHint { color: rgba(255,255,255,140); font-size: 11px; }
-            #sectionHeading, #editorHeading { color: #ffffff; font-weight: 600; }
-            QAbstractScrollArea, QScrollArea, QAbstractScrollArea::viewport, #editorScroll, #paperContent, #notesContent, #recentContent, #frontierContent, #achievementContent { background: transparent; border: 0; }
-            QScrollBar:vertical { background: transparent; width: 7px; margin: 2px; }
-            QScrollBar::handle:vertical { background: rgba(255,255,255,55); border-radius: 3px; min-height: 25px; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-            QScrollBar:horizontal { background: transparent; height: 7px; margin: 2px; }
-            QScrollBar::handle:horizontal { background: rgba(255,255,255,55); border-radius: 3px; min-width: 25px; }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
-            #paperCard { background: rgba(15, 28, 54, 242); border: 1px solid rgba(140,190,235,90); border-radius: 7px; }
-            #journalEditor, #journalHistory { background: rgba(24, 42, 75, 245); border: 1px solid rgba(140,190,235,75); border-radius: 6px; }
-            #journalLibraryRow { background: rgba(15, 28, 54, 242); border: 1px solid rgba(140,190,235,90); border-radius: 7px; }
-            #journalUsage { color: #8fe2ff; font-size: 10px; }
-            #cardTitle { color: #ffffff; font-size: 13px; font-weight: 700; }
-            #cardMeta { color: #80d8ff; font-size: 11px; font-weight: 600; }
-            #cardDetail { color: rgba(255,255,255,145); font-size: 10px; }
-            #cardNotes { background: rgba(255,255,255,22); color: rgba(255,255,255,175); border-radius: 4px; padding: 6px; font-size: 11px; }
-            #historyCount, #statusBadge { background: rgba(60,190,255,50); color: #8fe2ff; border-radius: 9px; padding: 4px 8px; font-size: 11px; }
-            QSlider::groove:horizontal { height: 3px; background: rgba(255,255,255,70); border-radius: 2px; }
-            QSlider::handle:horizontal { width: 10px; margin: -4px 0; border-radius: 5px; background: #ffffff; }
-            QCheckBox::indicator { width: 17px; height: 17px; border: 2px solid rgba(255,255,255,210); border-radius: 9px; background: transparent; }
-            QCheckBox::indicator:checked { border-color: #4ce58b; background: #4ce58b; }
-
-            /* Unified compact research-workspace system */
-            QWidget { color: #e8eef7; font-family: "Microsoft YaHei UI", "Microsoft YaHei"; font-size: 12px; }
-            QPushButton { background: #172a43; color: #d8e5f5; border: 1px solid #314e70; border-radius: 7px; padding: 5px 8px; font-size: 11px; }
-            QPushButton:hover { background: #213b5c; color: #ffffff; border-color: #4d759b; }
-            QPushButton:disabled { background: #142238; color: #7690ad; border-color: #263d59; }
-            #windowRoot { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #101a2b, stop:1 #0b1321); border: 1px solid #263a55; border-radius: 12px; }
-            #contentStack { background: transparent; }
-            #sidebar { background: #0a1220; border-right: 1px solid #233650; }
-            #topbar { background: #0d1727; border-bottom: 1px solid #233650; }
-            #brand { color: #f7fbff; font-size: 14px; font-weight: 700; letter-spacing: 1px; }
-            #navButton { color: #8ca1bf; border-radius: 8px; padding: 6px 5px; font-size: 9px; letter-spacing: 1px; }
-            #navButton:hover { background: #172842; color: #f5f9ff; }
-            #navButton:checked { background: #183354; color: #8cd4ff; }
-            #sidebarPinButton { background: #111e31; color: #a7b8cf; border: 1px solid #2c4767; border-radius: 6px; padding: 4px 2px; font-size: 10px; }
-            #sidebarPinButton:hover { background: #1b3150; color: #ffffff; }
-            #sidebarPinButton:checked { background: #2c2a1e; border-color: #665829; color: #f3d277; }
-            #iconButton, #windowButton, #closeButton { color: #aab9cf; border-radius: 6px; padding: 3px 6px; font-size: 16px; }
-            #iconButton:hover, #windowButton:hover { background: #1b2c44; color: #ffffff; }
-            #closeButton:hover { background: #a84555; color: #ffffff; }
-            #lockButton { color: #b6c5d8; border-radius: 6px; padding: 4px 7px; font-size: 10px; }
-            #lockButton:hover { background: #1b2c44; color: #ffffff; }
-            #lockButton:checked { background: #2b291d; color: #f6d56f; }
-            QLineEdit, QDateEdit, QComboBox, QPlainTextEdit { background: #111f33; color: #eff5ff; border: 1px solid #2e4968; border-radius: 8px; padding: 6px 9px; selection-background-color: #2e78a7; }
-            QLineEdit:focus, QDateEdit:focus, QComboBox:focus, QPlainTextEdit:focus { border-color: #63c5f4; }
-            QComboBox { padding-right: 29px; min-height: 17px; }
-            QComboBox::drop-down { width: 24px; border: 0; border-left: 1px solid #2e4968; border-top-right-radius: 8px; border-bottom-right-radius: 8px; background: #172a43; }
-            QComboBox::drop-down:hover { background: #203b5d; }
-            QComboBox QAbstractItemView { background: #111f33; color: #f5f9ff; border: 1px solid #4a698d; outline: 0; selection-background-color: #2a628f; selection-color: #ffffff; padding: 3px; }
-            QComboBox QAbstractItemView::item { min-height: 25px; padding: 5px 10px; color: #eff5ff; }
-            QComboBox QAbstractItemView::item:hover, QComboBox QAbstractItemView::item:selected { background: #2a628f; color: #ffffff; }
-            QMenu { background: #111f33; color: #eef5ff; border: 1px solid #3a5879; padding: 5px; }
-            QMenu::item { padding: 7px 18px; border-radius: 5px; }
-            QMenu::item:selected { background: #2a628f; color: #ffffff; }
-            #primaryButton { background: #57d89a; color: #082016; border: 0; border-radius: 8px; padding: 7px 11px; font-weight: 700; }
-            #primaryButton:hover { background: #78e8ad; }
-            #primaryAction { background: #245c7c; color: #ddf4ff; border: 1px solid #3f86ad; border-radius: 7px; padding: 4px 8px; font-size: 10px; font-weight: 700; }
-            #primaryAction:hover { background: #2e7197; color: #ffffff; }
-            #inboxButton { background: #57d89a; color: #082016; border: 0; border-radius: 6px; padding: 0; font-size: 17px; font-weight: 700; }
-            #inboxButton:hover { background: #78e8ad; }
-            #subtleButton { background: #172a43; color: #d8e5f5; border: 1px solid #314e70; border-radius: 8px; padding: 6px 9px; }
-            #subtleButton:hover { background: #213b5c; color: #ffffff; }
-            #pageTitle { color: #f7faff; font-size: 26px; font-weight: 700; }
-            #paperPageTitle { color: #f7faff; font-size: 22px; font-weight: 700; }
-            #dateLabel { color: #91a7c4; font-size: 11px; }
-            #summaryLabel { color: #dce7f7; font-size: 20px; font-weight: 400; }
-            #overviewCard, #inspirationCard, #notesCard, #paperCard, #journalLibraryRow { background: #121f33; border: 1px solid #294461; border-radius: 11px; }
-            #overviewCard:hover, #paperCard:hover, #journalLibraryRow:hover { border-color: #4a739b; }
-            #cardHeading { color: #dbe8f7; font-size: 11px; font-weight: 700; }
-            #cardHint, #sectionLabel, #formHint { color: #8ea4c0; font-size: 10px; }
-            #metricValue { color: #f8fbff; font-size: 17px; font-weight: 600; }
-            #cardLink { color: #7ed0fa; font-size: 10px; }
-            #cardLink:hover { color: #c7edff; }
-            #cardTitle { color: #f1f6ff; font-size: 13px; font-weight: 700; }
-            #cardMeta { color: #91d2fb; font-size: 10px; font-weight: 600; }
-            #cardDetail { color: #9fb3cd; font-size: 10px; }
-            #cardNotes { background: #172a42; color: #c0cede; border-radius: 7px; padding: 5px 7px; font-size: 10px; }
-            #journalHistory, #journalEditor, #readingRow, #noteItemRow { background: #162741; border: 1px solid #315070; border-radius: 9px; }
-            #rejectionArchiveFrame { background: #231a28; border: 1px solid #684454; border-radius: 9px; }
-            QScrollArea#rejectionArchivePanel, QScrollArea#rejectionArchivePanel::viewport, #rejectionArchiveContent { background: transparent; border: 0; }
-            #rejectionArchiveRow { background: #302435; border: 1px solid #604657; border-radius: 9px; }
-            #rejectionArchiveRow:hover { background: #382a3d; border-color: #966176; }
-            #achievementRow { background: #162741; border: 1px solid #315070; border-radius: 9px; }
-            #achievementRow:hover { border-color: #4b7199; }
-            #archiveHeading { color: #f4dce2; font-size: 11px; font-weight: 700; }
-            #archiveCount { background: #4e2d3a; color: #ffd0d8; border-radius: 8px; padding: 2px 6px; font-size: 10px; }
-            #rejectionArchiveMarker { color: #ffa5b4; font-size: 15px; font-weight: 700; }
-            #rejectionArchiveText { color: #fff1f4; font-size: 12px; font-weight: 700; }
-            #achievementTitle { color: #eff5ff; font-size: 12px; font-weight: 700; }
-            #rejectionArchiveMeta, #archiveHint { color: #d9bfc6; font-size: 10px; }
-            #paperLifecycleHint, #achievementMeta { color: #9fb3cd; font-size: 10px; }
-            #paperLifecycleHint { background: #163d2d; color: #9beabf; border-radius: 7px; padding: 5px 7px; }
-            #futureDateIssueFrame { background: #3a2630; border: 1px solid #805161; border-radius: 8px; }
-            #futureDateIssueLabel { color: #ffd4d9; font-size: 10px; }
-            #futureDateRepairButton { background: #e4b35a; color: #1d1708; border: 0; border-radius: 5px; padding: 5px 8px; font-size: 10px; font-weight: 700; }
-            #futureDateRepairButton:hover { background: #f6cd75; }
-            #achievementType { background: #193552; color: #a9dfff; border-radius: 8px; padding: 3px 7px; font-size: 10px; }
-            #noteItemRow:hover { border-color: #4b7199; }
-            #noteItemTitle { color: #eff5ff; font-size: 12px; font-weight: 600; }
-            #inspirationKind { background: #193552; color: #a9dfff; border-radius: 8px; padding: 3px 7px; font-size: 10px; }
-            #journalUsage { color: #8dd4ff; font-size: 10px; }
-            #journalGroupHeading { color: #9db8da; font-size: 10px; font-weight: 700; letter-spacing: 1px; padding: 6px 2px 1px; }
-            #journalPublisher { color: #99c7ed; font-size: 10px; }
-            #journalTags { color: #a9b9ce; font-size: 10px; }
-            #journalJcr { background: #233c58; color: #a8dcff; border-radius: 6px; padding: 2px 4px; font-size: 9px; font-weight: 700; }
-            #fileAttachmentRow { background: #162741; border: 1px solid #315070; border-radius: 7px; }
-            #fileAttachmentIcon { color: #8bd3ff; font-size: 12px; }
-            #fileAttachmentName { color: #e2edf9; font-size: 11px; }
-            #fileAttachmentKind { color: #8fa7c2; font-size: 10px; }
-            #fileOpenButton { background: #193450; color: #a9defb; border: 1px solid #396082; border-radius: 7px; padding: 5px 7px; font-size: 10px; }
-            #fileOpenButton:hover { background: #255071; color: #ffffff; }
-            #historyCount, #statusBadge { background: #173956; color: #a6ddff; border-radius: 8px; padding: 3px 7px; font-size: 10px; }
-            #frontierCard { background: #12233a; border: 1px solid #315476; border-radius: 11px; }
-            #frontierCard:hover { border-color: #5a8ab6; }
-            #frontierTitle { color: #edf6ff; font-size: 13px; font-weight: 700; }
-            #frontierSummary { color: #c8dbeb; font-size: 11px; }
-            #frontierMatches { color: #9db6d1; font-size: 10px; }
-            #frontierReason, #frontierBrief { color: #b9d8f0; font-size: 11px; }
-            #frontierScore { background: #1b4c62; color: #b9f1ff; border-radius: 8px; padding: 3px 7px; font-size: 10px; font-weight: 700; }
-            #frontierAi { background: #263f60; color: #b8d8ff; border-radius: 8px; padding: 3px 7px; font-size: 10px; font-weight: 700; }
-            #frontierMust, #frontierWatch, #frontierExpand { border-radius: 8px; padding: 3px 7px; font-size: 10px; }
-            #frontierMust { background: #3c3420; color: #f5d57e; }
-            #frontierWatch { background: #173e5e; color: #9bdcff; }
-            #frontierExpand { background: #27354a; color: #becce0; }
-            #journalToolsMenu { background: #111f33; color: #e8f1ff; border: 1px solid #3b5d80; padding: 4px; }
-            #journalToolsMenu::item { padding: 7px 18px; border-radius: 5px; }
-            #journalToolsMenu::item:selected { background: #2a628f; color: #ffffff; }
-            #rowButton, #dangerButton { border-radius: 6px; padding: 3px 6px; font-size: 11px; }
-            #rowButton { color: #b3c4d9; }
-            #rowButton:hover { background: #243e5d; color: #ffffff; }
-            #dangerButton { color: #f0a2aa; }
-            #dangerButton:hover { background: #65313c; color: #ffffff; }
-            #dragHandle { background: transparent; color: #a2bad6; border: 0; border-radius: 6px; padding: 2px 3px; font-size: 16px; }
-            #dragHandle:hover { background: #243e5d; color: #ffffff; }
-            #dragHandle:pressed { background: #365a80; color: #ffffff; }
-            #todoList::item { background: #13233a; border-bottom: 1px solid #263f5d; padding: 3px; }
-            #todoText, #doneText { font-size: 14px; }
-            #nodeText, #nodeRed, #nodeYellow, #nodeGreen { font-size: 11px; }
-            QScrollBar:vertical { width: 6px; margin: 3px; }
-            QScrollBar::handle:vertical { background: #476a8d; border-radius: 3px; min-height: 22px; }
-
-            /* Focused workspace palette: one quiet surface scale, one accent. */
-            #windowRoot { background: #0d1726; border: 1px solid #2a405c; border-radius: 10px; }
-            #contentStack { background: #0d1726; }
-            #sidebar { background: #0a1320; border-right: 1px solid #243a55; }
-            #topbar { background: #0d1726; border-bottom: 1px solid #243a55; }
-            #overviewCard, #inspirationCard, #notesCard, #paperCard, #journalLibraryRow,
-            #frontierCard, #sourceCard, #journalPriorityCard, #achievementRow {
-                background: #142137; border: 1px solid #2d4766; border-radius: 9px;
-            }
-            #overviewCard:hover, #paperCard:hover, #journalLibraryRow:hover,
-            #frontierCard:hover, #achievementRow:hover { background: #172741; border-color: #49769e; }
-            #journalHistory, #journalEditor, #readingRow, #noteItemRow, #fileAttachmentRow,
-            #achievementPdfRow { background: #172842; border: 1px solid #345675; border-radius: 8px; }
-            #rejectionArchiveFrame { background: #182338; border: 1px solid #5a4d61; border-radius: 9px; }
-            #rejectionArchiveRow { background: #202b41; border: 1px solid #594b60; border-radius: 8px; }
-            #rejectionArchiveRow:hover { background: #27344d; border-color: #8a6579; }
-            #paperLifecycleHint { background: #14372b; color: #a7edc4; }
-            #pageTitle { font-size: 24px; }
-            #paperPageTitle { font-size: 21px; }
-            #cardTitle { font-size: 12px; }
-            #cardDetail, #cardHint, #sectionLabel, #formHint, #dateLabel { color: #9bb0c8; }
-            #statusBadge, #historyCount { background: #193b58; color: #b5e2ff; border-radius: 7px; padding: 3px 6px; }
-            #journalJcr { background: #1d405a; color: #c1e8ff; border-radius: 6px; padding: 2px 5px; }
-            #frontierScore { background: #1b5364; color: #c4f8ff; }
-            #frontierAi { background: #29405d; color: #c7dcff; }
-            #frontierMust { background: #413720; color: #ffe094; }
-            #frontierWatch { background: #1b425d; color: #b6e7ff; }
-            #frontierExpand { background: #28384d; color: #cfdaea; }
-            QToolTip { background: #111d2f; color: #eff6ff; border: 1px solid #486b90; padding: 5px 7px; border-radius: 5px; }
-            """
-        )
-        # Retain the old selector map above only as a migration reference. Its
-        # local stylesheet is deliberately cleared so the semantic app theme
-        # controls every page, popup and standard widget from one place.
-        self.setStyleSheet("")
-        appearance = self.settings.get("appearance", {})
-        appearance = appearance if isinstance(appearance, dict) else {}
-        self._apply_theme(
-            str(appearance.get("theme_id", "fog_teal")),
-            str(appearance.get("density", "comfortable")),
-        )
 
     def closeEvent(self, event) -> None:
         self.todo_page.save()
         self.paper_page.save()
+        if bool(self.settings.get("close_to_tray", False)) and not self._exit_requested:
+            event.ignore()
+            self._hide_to_tray(notify=True)
+            return
         self._capture_mode_geometry()
         self._save_settings()
         if self.tray_icon:

@@ -35,15 +35,8 @@ class ThemeSettingsV11Tests(TestCase):
         self.assertEqual(theme["warning"], "#A86D31")
         self.assertEqual(theme["danger"], "#AA514D")
 
-    def test_all_twelve_theme_choices_build_readable_control_and_popup_rules(self) -> None:
-        self.assertEqual(
-            set(THEME_REGISTRY),
-            {
-                "fog_teal", "ink_white", "moss_paper", "warm_sand", "graphite_mist", "night_sea",
-                "cinnabar_paper", "violet_grove", "night_coral", "sunrise_cloud", "aurora_night",
-                "iris_sun",
-            },
-        )
+    def test_single_theme_builds_readable_control_and_popup_rules(self) -> None:
+        self.assertEqual(set(THEME_REGISTRY), {"fog_teal"})
         self.assertEqual(set(THEME_IDS), set(THEME_REGISTRY))
         for theme_id in THEME_REGISTRY:
             stylesheet = build_application_stylesheet(theme_id, "comfortable")
@@ -119,8 +112,7 @@ class ThemeSettingsV11Tests(TestCase):
         self.assertEqual(dialog.clear_calls, 1)
         dialog.close()
 
-    def test_existing_settings_dialog_follows_a_theme_change(self) -> None:
-        """A dialog opened before preview must not keep a copied old palette."""
+    def test_legacy_theme_request_maps_to_the_single_palette(self) -> None:
         apply_application_theme(self.application, "fog_teal", "comfortable")
         dialog = QDialog()
         dialog.show()
@@ -131,11 +123,11 @@ class ThemeSettingsV11Tests(TestCase):
         self.application.processEvents()
         after = dialog.palette().color(QPalette.ColorRole.Window).name()
 
-        self.assertNotEqual(before, after)
+        self.assertEqual(before, after)
+        self.assertEqual(self.application.property("research_assistant_theme_id"), "fog_teal")
         dialog.close()
 
-    def test_existing_palette_driven_cards_repaint_when_the_theme_changes(self) -> None:
-        """A visible card must change pixels, not only its stored palette."""
+    def test_existing_palette_driven_cards_ignore_retired_theme_ids(self) -> None:
         apply_application_theme(self.application, "fog_teal", "comfortable")
         dialog = QDialog()
         layout = QVBoxLayout(dialog)
@@ -158,7 +150,7 @@ class ThemeSettingsV11Tests(TestCase):
         QTest.qWait(20)
         after = dialog.grab().toImage().pixelColor(point).name()
 
-        self.assertNotEqual(before, after)
+        self.assertEqual(before, after)
 
     def test_row_actions_keep_the_standard_text_size(self) -> None:
         """Frontier, papers and profile actions share rowButton styling."""
@@ -186,7 +178,7 @@ class ThemeSettingsV11Tests(TestCase):
             }
         )
 
-        self.assertEqual(dialog.theme_selector.currentData(), "fog_teal")
+        self.assertFalse(hasattr(dialog, "theme_selector"))
         self.assertEqual(dialog.density_selector.currentData(), "comfortable")
         self.assertFalse(hasattr(dialog, "application_mode_selector"))
         payload = dialog.values()
@@ -237,7 +229,7 @@ class ThemeSettingsV11Tests(TestCase):
 
         window._apply_settings(updated)
 
-        self.assertEqual(self.application.property("research_assistant_theme_id"), "warm_sand")
+        self.assertEqual(self.application.property("research_assistant_theme_id"), "fog_teal")
         self.assertEqual(self.application.property("research_assistant_density"), "compact")
         self.assertEqual(window.application_mode, "widget")
         if window.tray_icon:

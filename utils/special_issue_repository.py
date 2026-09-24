@@ -80,7 +80,11 @@ def _normalize_item(raw: Any) -> dict[str, Any] | None:
     item_id = str(raw.get("id", "")).strip()
     if not item_id:
         return None
-    result = deepcopy(raw)
+    # The parsed JSON object is already private to the repository.  A shallow
+    # record copy is sufficient because normalization replaces every mutable
+    # personal/history field it may touch.  Deep-copying every nested score
+    # and evidence object multiplied a 64 MB store into hundreds of MB.
+    result = dict(raw)
     result["id"] = item_id
     status = str(raw.get("status", "unread")).strip().casefold()
     result.setdefault("legacy_status", status if status in _STATUS_PRIORITY else "unread")
@@ -100,11 +104,11 @@ def _normalize_item(raw: Any) -> dict[str, Any] | None:
 
 
 def _merge_items(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
-    result = deepcopy(left)
+    result = dict(left)
     for key, value in right.items():
         if key not in {*_LIST_FIELDS, *_HISTORY_FIELDS, "status", "first_seen_at", "last_seen_at"}:
             if value not in (None, "", [], {}):
-                result[key] = deepcopy(value)
+                result[key] = value
     for field in _LIST_FIELDS:
         result[field] = _unique_strings([*left.get(field, []), *right.get(field, [])])
     for field in _HISTORY_FIELDS:
@@ -137,8 +141,11 @@ def normalize_special_issue_store(raw: Any) -> dict[str, Any]:
         else:
             items[position] = _merge_items(items[position], item)
     refresh_status = str(payload.get("last_refresh_status", "never")).strip() or "never"
-    return {
-        **deepcopy(payload),
+    # Preserve forward-compatible fields without first cloning the complete
+    # ``items`` list.  Items are rebuilt above and known mutable metadata is
+    # copied below, so this remains non-mutating for callers.
+    result = {key: value for key, value in payload.items() if key != "items"}
+    result.update({
         "version": 2,
         "revision": int(payload.get("revision", 0) or 0),
         "refresh_generation": int(payload.get("refresh_generation", 0) or 0),
@@ -151,7 +158,8 @@ def normalize_special_issue_store(raw: Any) -> dict[str, Any]:
         "last_refresh_status": refresh_status,
         "notification_log": _unique_dicts(payload.get("notification_log", []), limit=500),
         "reminder_log": _unique_dicts(payload.get("reminder_log", []), limit=500),
-    }
+    })
+    return result
 
 
 def _store_path() -> Path:
@@ -172,6 +180,147 @@ def load_special_issue_store() -> dict[str, Any]:
     return normalize_special_issue_store(payload)
 
 
+def _summary_path() -> Path:
+    return file_manager.SPECIAL_ISSUES_SUMMARY_FILE
+
+
+def _source_signature() -> dict[str, int]:
+    try:
+        stat = _store_path().stat()
+    except OSError:
+        return {"size": 0, "mtime_ns": 0}
+    return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+
+
+def _overview_items(store: dict[str, Any], *, now: datetime | None = None) -> list[dict[str, Any]]:
+    """Return only records reachable from the four workbench views.
+
+    The complete discovery history remains in ``special_issues.json``.  This
+    derived active index contains recommendations and every item carrying a
+    user decision or a visible change, which is exactly what the compact page
+    and workbench can display.
+    """
+
+    from utils.special_issue_policy import CONTENT_THRESHOLD, is_ignored, is_saved
+
+    del now  # Eligibility is evaluated by the page with its own current date.
+    active: list[dict[str, Any]] = []
+    for item in store.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        personal = bool(
+            is_saved(item)
+            or is_ignored(item)
+            or item.get("deadline_history")
+            or item.get("verification_history")
+        )
+        is_v13 = str(item.get("scoring_version", "")).startswith("special-issue-dual-axis-13")
+        if is_v13:
+            potential_recommendation = str(item.get("candidate_state", "")) == "visible"
+        else:
+            match = item.get("match", {}) if isinstance(item.get("match"), dict) else {}
+            try:
+                score = int(match.get("score", 0) or 0)
+            except (TypeError, ValueError):
+                score = 0
+            potential_recommendation = bool(
+                (item.get("scope_is_complete") or item.get("scope_status") == "full")
+                and match.get("content_qualified", match.get("formal", False))
+                and score >= CONTENT_THRESHOLD
+            )
+        if personal or potential_recommendation:
+            active.append(item)
+    return active
+
+
+def _overview_projection(item: dict[str, Any]) -> dict[str, Any]:
+    """Remove discovery-only bulk while retaining every workbench field."""
+
+    result = dict(item)
+    # These candidates are audit material for the discovery pipeline; the UI
+    # only uses the chosen deadline and its compact history.
+    result.pop("deadline_candidates", None)
+    aliases = item.get("id_aliases", [])
+    if isinstance(aliases, list):
+        result["id_aliases"] = aliases[-50:]
+    evidence = item.get("source_evidence", [])
+    if isinstance(evidence, list):
+        unique: dict[str, dict[str, Any]] = {}
+        for row in evidence:
+            if not isinstance(row, dict):
+                continue
+            key = "|".join(
+                str(row.get(field, "")).strip()
+                for field in ("source", "url", "source_url", "published_at", "updated_at")
+            )
+            if not key:
+                key = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+            unique[key] = row
+        ordered = sorted(
+            unique.values(),
+            key=lambda row: str(row.get("updated_at") or row.get("published_at") or row.get("checked_at") or ""),
+        )
+        result["source_evidence"] = ordered[-80:]
+    return result
+
+
+def _build_overview(store: dict[str, Any], signature: dict[str, int] | None = None) -> dict[str, Any]:
+    metadata = {
+        key: value
+        for key, value in store.items()
+        if key not in {"items", "action_log", "notification_log", "reminder_log"}
+    }
+    return {
+        **metadata,
+        "items": [_overview_projection(item) for item in _overview_items(store)],
+        "total_item_count": len(store.get("items", [])),
+        "source_signature": signature if signature is not None else _source_signature(),
+        "summary_version": 1,
+    }
+
+
+def _write_overview(store: dict[str, Any], signature: dict[str, int] | None = None) -> None:
+    path = _summary_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(_build_overview(store, signature), ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def load_special_issue_overview() -> dict[str, Any]:
+    """Load the small UI index, rebuilding it when the full store changed."""
+
+    signature = _source_signature()
+    path = _summary_path()
+    if path.is_file():
+        try:
+            cached = json.loads(path.read_text(encoding="utf-8-sig"))
+            if isinstance(cached, dict) and cached.get("source_signature") == signature:
+                return cached
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            pass
+    store = load_special_issue_store()
+    latest_signature = _source_signature()
+    if latest_signature != signature:
+        store = load_special_issue_store()
+        latest_signature = _source_signature()
+    overview = _build_overview(store, latest_signature)
+    try:
+        _write_overview(store, latest_signature)
+    except OSError:
+        pass
+    return overview
+
+
 def _prepare_store(store: dict[str, Any]) -> dict[str, Any]:
     current = load_special_issue_store()
     if "revision" in store and int(store["revision"]) != current["revision"]:
@@ -184,9 +333,17 @@ def _prepare_store(store: dict[str, Any]) -> dict[str, Any]:
 @_serialized
 def save_special_issue_store(store: dict[str, Any]) -> None:
     try:
-        apply_json_transaction({_store_path(): _prepare_store(store)})
+        prepared = _prepare_store(store)
+        apply_json_transaction({_store_path(): prepared})
     except Exception as error:
         raise SpecialIssueRepositoryError(f"保存特刊数据失败: {error}") from error
+    # The overview is a disposable acceleration index.  A locked or
+    # read-only cache path must never turn a successful authoritative save
+    # into an apparent failure that callers might retry.
+    try:
+        _write_overview(prepared, _source_signature())
+    except (OSError, TypeError, ValueError):
+        pass
 
 
 def resolve_special_issue_id(issue_id: str, store: dict[str, Any] | None = None) -> str:

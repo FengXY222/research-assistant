@@ -496,13 +496,22 @@ class FrontierSettingsDialog(ResearchProfileDialog):
             return
         quality_frame, quality = self._section(
             "每日前沿质量边界",
-            "默认只把已核验的 JCR 1/2 区期刊放进每日推荐；中科院分区、OA 和 EasyScholar 状态只作为核对信息，不冒充 JCR 核验。",
+            "已确认的 JCR Q3/Q4 仅保留去重指纹；缺失信息和未知分区候选继续后台补全，不会以 0 分推送。",
         )
         self.require_q1_q2 = QCheckBox("默认只推荐已核验 JCR Q1 / Q2")
         self.require_q1_q2.setObjectName("requireQ1Q2Check")
         self.require_q1_q2.setChecked(bool(self._profile.get("require_verified_jcr_q1_q2", True)))
         quality.addWidget(self.require_q1_q2)
         self._add_quality_option_row(quality)
+        self.retain_unread = QCheckBox("未读论文次日继续保留在每日前沿")
+        self.retain_unread.setObjectName("retainUnreadFrontierCheck")
+        self.retain_unread.setChecked(bool(self._profile.get("retain_unread", True)))
+        self.retain_unread.setToolTip("关闭后，未读卡片次日删除内容，但仍保留去重指纹，今后不会重复推送")
+        quality.addWidget(self.retain_unread)
+        self.show_preprints = QCheckBox("在同一金字塔中显示预印本")
+        self.show_preprints.setObjectName("showFrontierPreprintsCheck")
+        self.show_preprints.setChecked(bool(self._profile.get("show_preprints", True)))
+        quality.addWidget(self.show_preprints)
         ranking = frontier_ranking_settings(self._profile)
         weight_row = QHBoxLayout()
         weight_row.setSpacing(8)
@@ -632,11 +641,29 @@ class FrontierSettingsDialog(ResearchProfileDialog):
         self.source_openalex.setObjectName("frontierSourceOpenAlex")
         self.source_doaj = QCheckBox("DOAJ")
         self.source_doaj.setObjectName("frontierSourceDoaj")
+        self.source_semantic_scholar = QCheckBox("Semantic Scholar")
+        self.source_semantic_scholar.setObjectName("frontierSourceSemanticScholar")
+        self.source_europe_pmc = QCheckBox("Europe PMC")
+        self.source_europe_pmc.setObjectName("frontierSourceEuropePmc")
+        self.source_arxiv = QCheckBox("arXiv")
+        self.source_arxiv.setObjectName("frontierSourceArxiv")
         sources = self._profile.get("sources", {}) if isinstance(self._profile.get("sources", {}), dict) else {}
         self.source_crossref.setChecked(bool(sources.get("crossref", {}).get("enabled", True)))
         self.source_openalex.setChecked(bool(sources.get("openalex", {}).get("enabled", True)))
         self.source_doaj.setChecked(bool(sources.get("doaj", {}).get("enabled", True)))
-        for index, checkbox in enumerate((self.source_crossref, self.source_openalex, self.source_doaj)):
+        self.source_semantic_scholar.setChecked(bool(sources.get("semantic_scholar", {}).get("enabled", True)))
+        self.source_europe_pmc.setChecked(bool(sources.get("europe_pmc", {}).get("enabled", True)))
+        self.source_arxiv.setChecked(bool(sources.get("arxiv", {}).get("enabled", True)))
+        for index, checkbox in enumerate(
+            (
+                self.source_crossref,
+                self.source_openalex,
+                self.source_doaj,
+                self.source_semantic_scholar,
+                self.source_europe_pmc,
+                self.source_arxiv,
+            )
+        ):
             source_grid.addWidget(checkbox, index // 2, index % 2)
         source_grid.setColumnStretch(0, 1)
         source_grid.setColumnStretch(1, 1)
@@ -675,7 +702,7 @@ class FrontierSettingsDialog(ResearchProfileDialog):
 
     def _add_quality_option_row(self, layout: QVBoxLayout) -> None:
         row = QHBoxLayout()
-        hint = QLabel("已核验 Q3/Q4 继续过滤；关闭严格门槛后，未知分区仍会单独标记为待核验。")
+        hint = QLabel("系统不把未知事实当作 0 分；只有已核验 JCR Q3/Q4 会按本次规则移出内容库。")
         hint.setObjectName("frontierSettingsHint")
         hint.setWordWrap(True)
         row.addWidget(hint, 1)
@@ -933,6 +960,9 @@ class FrontierSettingsDialog(ResearchProfileDialog):
     def profile(self) -> dict[str, Any]:
         result = super().profile()
         result["require_verified_jcr_q1_q2"] = bool(self.require_q1_q2.isChecked())
+        result["retain_unread"] = bool(self.retain_unread.isChecked())
+        result["show_preprints"] = bool(self.show_preprints.isChecked())
+        result["lookback_days"] = 14
         result["frontier_ranking"] = {
             "journal_weight": self.journal_weight_spin.value(),
             "default_journal_score": self.default_journal_score_spin.value(),
@@ -944,6 +974,9 @@ class FrontierSettingsDialog(ResearchProfileDialog):
             ("crossref", self.source_crossref),
             ("openalex", self.source_openalex),
             ("doaj", self.source_doaj),
+            ("semantic_scholar", self.source_semantic_scholar),
+            ("europe_pmc", self.source_europe_pmc),
+            ("arxiv", self.source_arxiv),
         ):
             current = sources.get(source_id, {}) if isinstance(sources.get(source_id, {}), dict) else {}
             sources[source_id] = {**current, "enabled": bool(checkbox.isChecked())}

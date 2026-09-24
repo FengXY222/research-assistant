@@ -10,7 +10,9 @@ from utils.jcr_service import jcr_label
 
 try:
     from utils.easyscholar_service import (
+        EasyScholarConfigurationError,
         EasyScholarRequestError,
+        easyscholar_readiness,
         enrich_journals_with_easyscholar,
         fetch_easyscholar_metrics,
         journal_easyscholar_signature,
@@ -19,7 +21,9 @@ try:
         parse_easyscholar_rank_payload,
     )
 except ImportError:  # The first red run intentionally documents the missing adapter.
+    EasyScholarConfigurationError = RuntimeError
     EasyScholarRequestError = RuntimeError
+    easyscholar_readiness = None
     enrich_journals_with_easyscholar = None
     fetch_easyscholar_metrics = None
     journal_easyscholar_signature = None
@@ -46,6 +50,26 @@ class EasyScholarServiceV111Tests(TestCase):
             }
         }
         self.journal = {"id": "soil", "name": "SOIL", "publisher": "Copernicus", "issn": "2199-398X"}
+
+    def test_readiness_requires_the_saved_token_to_be_decryptable(self) -> None:
+        readable = easyscholar_readiness(
+            {"enabled": True, "secret_key_secret": "token"},
+            revealer=lambda _token: "real-key",
+        )
+
+        def unreadable(_token: str) -> str:
+            from utils.secure_store import SecretStoreError
+
+            raise SecretStoreError("broken")
+
+        broken = easyscholar_readiness(
+            {"enabled": True, "secret_key_secret": "token"},
+            revealer=unreadable,
+        )
+        self.assertTrue(readable["ready"])
+        self.assertFalse(broken["ready"])
+        self.assertEqual(broken["state"], "unreadable")
+        self.assertTrue(broken["needs_reentry"])
 
     def test_parser_converts_public_rank_fields_into_source_labeled_metadata(self) -> None:
         self.assertTrue(callable(parse_easyscholar_rank_payload))

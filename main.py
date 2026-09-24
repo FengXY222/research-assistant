@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+from uuid import uuid4
 from collections.abc import Callable
 
 from utils.storage_bootstrap import prepare_v12_data_root
@@ -29,6 +31,46 @@ from utils.file_manager import load_app_settings
 
 SERVER_NAME = f"ScientificAssistantDesktopWidget_SingleInstance_{INSTANCE_CHANNEL}"
 SHARED_MEMORY_KEY = f"ScientificAssistantDesktopWidget_InstanceLock_{INSTANCE_CHANNEL}"
+
+
+def run_startup_probe() -> int:
+    """Non-visual acceptance probe used immediately after enabling autostart."""
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    executable = Path(sys.executable).resolve()
+    entrypoint = executable if getattr(sys, "frozen", False) else Path(__file__).resolve()
+    if not executable.is_file() or not entrypoint.is_file():
+        return 61
+    probe_file = DATA_DIR / f".startup-probe-{uuid4().hex}.tmp"
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        probe_file.write_text("ok", encoding="utf-8")
+        if probe_file.read_text(encoding="utf-8") != "ok":
+            return 62
+    except OSError:
+        return 63
+    finally:
+        try:
+            probe_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+    suffix = uuid4().hex
+    memory = QSharedMemory(SHARED_MEMORY_KEY + "_StartupProbe_" + suffix)
+    server = QLocalServer()
+    server_name = SERVER_NAME + "_StartupProbe_" + suffix
+    try:
+        if not memory.create(1):
+            return 64
+        QLocalServer.removeServer(server_name)
+        if not server.listen(server_name):
+            return 65
+    finally:
+        server.close()
+        QLocalServer.removeServer(server_name)
+        if memory.isAttached():
+            memory.detach()
+    app.processEvents()
+    return 0
 
 
 class SingleInstance:
@@ -83,6 +125,19 @@ class SingleInstance:
 
 
 def main() -> int:
+    if "--startup-probe" in sys.argv:
+        sys.argv = [value for value in sys.argv if value != "--startup-probe"]
+        return run_startup_probe()
+    started_at_login = "--autostart" in sys.argv
+    if started_at_login:
+        # Keep Qt from interpreting the application-specific switch.
+        sys.argv = [value for value in sys.argv if value != "--autostart"]
+    try:
+        from utils.v13_migration import migrate_to_v13
+
+        migrate_to_v13()
+    except Exception as error:  # noqa: BLE001 - backup-first migration failure must not destroy access to old data
+        print(f"科研助手 13.0 数据迁移未完成：{error}", file=sys.stderr)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
@@ -114,10 +169,10 @@ def main() -> int:
 
     window = MainWindow()
     instance.callback = window.show_and_activate
-    # A login-started research widget should be immediately usable.  The tray
-    # icon remains available after minimising, but startup no longer hides the
-    # window without the user's intent.
-    window.show_and_activate()
+    if started_at_login:
+        window.start_in_tray()
+    else:
+        window.show_and_activate()
     return app.exec()
 
 

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.dialogs import confirm_delete, show_undo_toast
+from ui.page_kit import PageHeader
 from ui.reorder import ORDER_MIME, OrderDragHandle, decode_order_payload
 from utils.file_manager import (
     cleanup_old_completed_tasks,
@@ -485,18 +486,10 @@ class TodoPage(QWidget):
         root.setContentsMargins(14, 14, 14, 12)
         root.setSpacing(8)
 
-        heading = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title_box.setSpacing(1)
-        title = QLabel("今日待办")
-        title.setObjectName("pageTitle")
-        title_box.addWidget(title)
-        heading.addLayout(title_box)
-        heading.addStretch()
-        self.summary_label = QLabel()
-        self.summary_label.setObjectName("summaryLabel")
-        heading.addWidget(self.summary_label, alignment=Qt.AlignmentFlag.AlignBottom)
-        root.addLayout(heading)
+        header = PageHeader("今日待办", accent="todo")
+        self.summary_label = header.hint_label
+        header.add_primary_action("＋ 添加", self._add_detailed_todo, tooltip="添加任务并设置持续时间或循环")
+        root.addWidget(header)
 
         add_bar = QHBoxLayout()
         add_bar.setSpacing(6)

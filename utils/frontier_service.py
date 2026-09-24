@@ -14,7 +14,9 @@ from datetime import date, datetime, timedelta
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from utils.api_rate_limit import rate_limited_urlopen as urlopen
 
 from utils.evidence_cache import EvidenceCache
 from utils.frontier_scoring import (
@@ -40,10 +42,12 @@ OPENALEX_API = "https://api.openalex.org"
 DOAJ_API = "https://doaj.org/api"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1"
 ARXIV_API = "https://export.arxiv.org/api/query"
-USER_AGENT = "ResearchAssistant/0.7 (personal desktop research tool)"
+ARXIV_SEARCH_URL = "https://arxiv.org/search/"
+USER_AGENT = "ResearchAssistant/13.0 (personal desktop research tool)"
 # Persisting this signature lets the UI distinguish an old cached digest from
 # results evaluated under the current keyword/priority logic.
 FRONTIER_ALGORITHM_VERSION = 13
+FRONTIER_AI_BATCH_SIZE = 5
 # Journal priority is deliberately a small bonus. Relevance to the research
 # profile is now a hard admission requirement rather than a side effect of a
 # favourite journal.
@@ -67,6 +71,98 @@ SOURCE_LABELS = {
 
 
 _RESET_FRONTIER_STATUSES = {"saved", "read", "deprioritized", "dismissed"}
+
+
+def _frontier_ai_review_candidate(item: dict[str, Any]) -> bool:
+    """Use the agreed fuzzy boundary to decide whether AI can change a result.
+
+    This is not a display quota. Candidates outside the band still keep their
+    normalized rule score and can enter same-day relative backfill without AI.
+    """
+
+    relevance = int(item.get("relevance_score", 0) or 0)
+    value = int(item.get("research_value_score", 0) or 0)
+    if str(item.get("pyramid_level", "")).strip():
+        return True
+    relevance_axis = item.get("relevance_axis", {}) if isinstance(item.get("relevance_axis"), dict) else {}
+    value_axis = item.get("value_axis", {}) if isinstance(item.get("value_axis"), dict) else {}
+    # Before AI runs, totals are normalized rule-only scores.  Admission must
+    # instead ask whether the bounded +34 adjustment could cross a real or
+    # five-point fuzzy pyramid boundary.
+    relevance = min(100, int(relevance_axis.get("base_score", 0) or 0) + 34)
+    value = min(100, int(value_axis.get("base_score", 0) or 0) + 34)
+    return bool(
+        (relevance >= 70 and value >= 70)
+        or (relevance >= 70 and value >= 40)
+        or (value >= 70 and relevance >= 40)
+        or (relevance >= 63 and value >= 63)
+    )
+
+
+def _aggregate_frontier_errors(values: Any) -> list[dict[str, Any]]:
+    """Collapse per-query repetitions while retaining source diagnostics."""
+
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for raw in values if isinstance(values, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        source = str(raw.get("source", "unknown")).strip() or "unknown"
+        error_type = str(raw.get("error_type", raw.get("type", "error"))).strip() or "error"
+        message = str(raw.get("error", raw.get("message", ""))).strip()[:500]
+        key = (source, error_type, message)
+        if key not in grouped:
+            grouped[key] = {
+                "source": source,
+                "error_type": error_type,
+                "error": message,
+                "occurrences": 0,
+                "queries": [],
+            }
+        grouped[key]["occurrences"] += 1
+        query = str(raw.get("query", raw.get("url", ""))).strip()
+        if query and query not in grouped[key]["queries"] and len(grouped[key]["queries"]) < 5:
+            grouped[key]["queries"].append(query)
+    return list(grouped.values())
+
+
+def _merge_retry_recall_outcomes(
+    previous: Any,
+    current: Any,
+    items: Any,
+    attempted_strategies: Any,
+) -> dict[str, dict[str, Any]]:
+    """A failed-source retry must not erase successful lanes from the full run."""
+
+    old = previous if isinstance(previous, dict) else {}
+    new = current if isinstance(current, dict) else {}
+    attempted = {str(value) for value in attempted_strategies if str(value)} if isinstance(attempted_strategies, list) else set()
+    counts: dict[str, int] = {}
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        strategies = item.get("recall_strategies", [item.get("recall_strategy", "")])
+        strategies = strategies if isinstance(strategies, list) else [strategies]
+        for strategy in {str(value) for value in strategies if str(value)}:
+            counts[strategy] = counts.get(strategy, 0) + 1
+    result: dict[str, dict[str, Any]] = {}
+    for strategy in set(old) | set(new):
+        prior = deepcopy(old.get(strategy, {})) if isinstance(old.get(strategy), dict) else {}
+        retry = deepcopy(new.get(strategy, {})) if isinstance(new.get(strategy), dict) else {}
+        historical_count = counts.get(strategy, 0)
+        if historical_count:
+            result[strategy] = {
+                "status": "SUCCESS",
+                "count": historical_count,
+                "error": "",
+            }
+            if str(retry.get("status", "")) == "FAILED":
+                result[strategy]["retry_status"] = "FAILED"
+                result[strategy]["retry_error"] = str(retry.get("error", ""))[:240]
+        elif strategy not in attempted and prior:
+            result[strategy] = prior
+        else:
+            result[strategy] = retry or prior
+    return result
 
 
 def reset_frontier_history(store: dict[str, Any]) -> dict[str, Any]:
@@ -641,17 +737,112 @@ def _fetch_semantic_scholar(query: str, start: date, today: date, key: str) -> l
     return records
 
 
-def _fetch_arxiv(query: str, start: date, today: date) -> list[dict[str, Any]]:
-    raw = _request_external_text(
-        ARXIV_API,
-        {
-            "search_query": f'all:"{query}"',
-            "start": 0,
-            "max_results": 18,
-            "sortBy": "submittedDate",
-            "sortOrder": "descending",
-        },
+def _arxiv_html_records(raw: bytes | str, start: date, today: date) -> list[dict[str, Any]]:
+    """Parse arXiv's public search page when the Atom representation returns 406.
+
+    This deliberately reads only fields visible on each result card.  It is a
+    representation fallback for the same public search, not a different or
+    inferred literature source.
+    """
+
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+    blocks = re.findall(
+        r'<li\b(?=[^>]*class=["\'][^"\']*\barxiv-result\b[^"\']*["\'])[^>]*>(.*?)</li>',
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
     )
+    records: list[dict[str, Any]] = []
+
+    def class_block(block: str, tag: str, class_name: str) -> str:
+        matches = re.finditer(
+            rf'<{tag}\b[^>]*class=["\']([^"\']*)["\'][^>]*>(.*?)</{tag}>',
+            block,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for match in matches:
+            if class_name.casefold() in match.group(1).casefold().split():
+                return match.group(2)
+        return ""
+
+    for block in blocks:
+        url_match = re.search(
+            r'href=["\'](https?://(?:www\.)?arxiv\.org/abs/[^"\'?#]+)',
+            block,
+            flags=re.IGNORECASE,
+        )
+        title = _strip_markup(class_block(block, "p", "title"))
+        if not title or not url_match:
+            continue
+
+        date_match = re.search(r"Submitted\s*</span>\s*([^;<]+)", block, flags=re.IGNORECASE)
+        published_date = ""
+        if date_match:
+            date_text = _strip_markup(date_match.group(1)).rstrip(".; ")
+            for date_format in ("%d %B, %Y", "%d %b, %Y"):
+                try:
+                    published_date = datetime.strptime(date_text, date_format).date().isoformat()
+                    break
+                except ValueError:
+                    continue
+        if not _is_in_range(published_date, start, today):
+            continue
+
+        author_block = class_block(block, "p", "authors")
+        authors = [
+            _strip_markup(value)
+            for value in re.findall(r"<a\b[^>]*>(.*?)</a>", author_block, flags=re.IGNORECASE | re.DOTALL)
+            if _strip_markup(value)
+        ]
+        abstract_block = class_block(block, "p", "abstract")
+        full_abstract = class_block(abstract_block, "span", "abstract-full")
+        abstract = _strip_markup(full_abstract or abstract_block)
+        abstract = re.sub(r"^Abstract:\s*", "", abstract, flags=re.IGNORECASE).strip()
+        abstract = re.sub(r"\s*[△▽]\s*(?:Less|More)\s*$", "", abstract, flags=re.IGNORECASE).strip()
+        records.append(
+            {
+                "title": title,
+                "journal": "arXiv 预印本",
+                "published_date": published_date,
+                "url": html.unescape(url_match.group(1)),
+                "doi": "",
+                "abstract": abstract,
+                "authors": authors,
+                "author_keywords": [],
+                "keyword_source": "",
+                "source_name": SOURCE_LABELS["arxiv"],
+            }
+        )
+    return records
+
+
+def _fetch_arxiv(query: str, start: date, today: date) -> list[dict[str, Any]]:
+    try:
+        raw = _request_external_text(
+            ARXIV_API,
+            {
+                "search_query": f'all:"{query}"',
+                "start": 0,
+                "max_results": 18,
+                "sortBy": "submittedDate",
+                "sortOrder": "descending",
+            },
+        )
+    except FrontierNetworkError as atom_error:
+        try:
+            html_raw = _request_external_text(
+                ARXIV_SEARCH_URL,
+                {
+                    "query": query,
+                    "searchtype": "all",
+                    "abstracts": "show",
+                    "order": "-announced_date_first",
+                    "size": 25,
+                },
+                accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+        except FrontierNetworkError as html_error:
+            raise FrontierNetworkError(f"arXiv Atom 与网页检索均失败：{html_error}") from atom_error
+        return _arxiv_html_records(html_raw, start, today)
     try:
         root = ET.fromstring(raw)
     except ET.ParseError as error:
@@ -705,6 +896,22 @@ def merge_frontier_refresh_item(incoming: dict[str, Any], previous: dict[str, An
     result = dict(incoming if isinstance(incoming, dict) else {})
     previous = previous if isinstance(previous, dict) else {}
     if not previous:
+        result["recommendation_date"] = str(result.get("recommendation_date", "")).strip() or today
+        result["first_seen_date"] = str(result.get("first_seen_date", "")).strip() or result["recommendation_date"]
+        return result
+    # v13 scores are complete dual-axis objects.  Reusing the legacy scalar
+    # feedback/AI equation here would turn their total into zero, so only
+    # durable user state is carried across while the freshly computed axes stay
+    # authoritative.
+    if str(result.get("scoring_version", "")).startswith("frontier-dual-axis-13"):
+        for key in (
+            "status", "feedback", "feedback_events", "one_line_feedback", "library_journal_id",
+            "locked", "favorite", "dismissed_from_status", "dismissed_from_feedback",
+            "deprioritized_from_status", "deprioritized_from_feedback", "first_seen_at",
+            "first_seen_date", "recommendation_date", "notified_at", "version_update_notified_at",
+        ):
+            if key in previous:
+                result[key] = deepcopy(previous[key])
         result["recommendation_date"] = str(result.get("recommendation_date", "")).strip() or today
         result["first_seen_date"] = str(result.get("first_seen_date", "")).strip() or result["recommendation_date"]
         return result
@@ -1535,3 +1742,512 @@ def update_daily_frontier_v12(
         "errors": [],
         "stream_counts": counts,
     }
+
+
+def update_daily_frontier_v13(
+    data: dict[str, Any],
+    journals: list[dict[str, Any]],
+    *,
+    progress: Any = None,
+    manual: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Run the v13 six-lane pipeline without requiring AI or fixed quotas."""
+
+    from utils import file_manager
+    from utils.frontier_discovery_v13 import discover_frontier_candidates_v13
+    from utils.source_registry import normalize_source_settings
+    from utils.v13_pipeline import (
+        batch_should_run,
+        begin_batch,
+        checkpoint,
+        record_batch_sources,
+        resume_stage,
+        retry_sources,
+    )
+    from utils.v13_policy import (
+        FRONTIER_SCORE_VERSION,
+        apply_unread_policy,
+        dynamic_pyramid,
+        frontier_display_decision,
+        merge_work_families,
+        score_frontier_item,
+        work_fingerprint,
+    )
+
+    now = now or datetime.now()
+    today_key = now.date().isoformat()
+
+    def emit(message: str, value: int) -> None:
+        if progress is None:
+            return
+        try:
+            progress(message, max(0, min(100, int(value))))
+        except TypeError:
+            progress(message)
+
+    original = deepcopy(data if isinstance(data, dict) else {})
+    profile = deepcopy(original.get("profile", {})) if isinstance(original.get("profile"), dict) else {}
+    authored = original.get("authored_papers", profile.get("authored_papers", []))
+    profile["authored_papers"] = [dict(value) for value in authored if isinstance(value, dict)] if isinstance(authored, list) else []
+    profile_view = build_profile_view(profile, now=now)
+    profile_view.update(
+        {
+            **profile,
+            "active_terms": deepcopy(profile.get("terms", profile_view.get("active_terms", []))),
+            "positive_seeds": deepcopy(profile_view.get("positive_seeds", [])),
+        }
+    )
+    settings = file_manager.load_app_settings()
+    source_settings = normalize_source_settings(settings.get("data_sources"))
+    profile_sources = profile.get("sources", {}) if isinstance(profile.get("sources"), dict) else {}
+    for source_id, value in profile_sources.items():
+        if source_id in source_settings and isinstance(value, dict) and "enabled" in value:
+            source_settings[source_id]["enabled"] = bool(value.get("enabled"))
+    runtime = file_manager.load_v13_runtime()
+    inputs = {
+        "profile": frontier_profile_signature_v11(profile, journals),
+        "enabled_sources": sorted(source_id for source_id, value in source_settings.items() if value.get("enabled")),
+        "journal_ids": sorted(str(value.get("id", "")) for value in journals if isinstance(value, dict)),
+        "score_version": FRONTIER_SCORE_VERSION,
+    }
+    retry_filter = retry_sources(runtime, task="daily_frontier", day=now.date())
+    # A successful day is immutable, even when the user presses refresh again.
+    # A partial day starts a fresh, failed-source-only batch; resuming the old
+    # commit checkpoint would merely recommit the same incomplete discovery.
+    if retry_filter == [] or not batch_should_run(runtime, task="daily_frontier", day=now.date(), manual=False):
+        visible = [value for value in original.get("items", []) if isinstance(value, dict) and value.get("candidate_state") == "visible"]
+        return {
+            "data": original,
+            "new_count": 0,
+            "visible_count": len(visible),
+            "brief": "今天的每日前沿已完整更新，本次未重复抓取。",
+            "errors": [],
+            "recall_outcomes": deepcopy(original.get("recall_outcomes", {})),
+            "runtime": runtime,
+            "batch_id": str(original.get("last_batch_id", "")),
+            "already_succeeded": True,
+        }
+    runtime, batch_id, resumed = begin_batch(
+        runtime,
+        task="daily_frontier",
+        inputs=inputs,
+        now=now,
+        manual=bool(retry_filter) or manual,
+    )
+    file_manager.save_v13_runtime(runtime)
+    start_stage = resume_stage(runtime, batch_id)
+    emit("正在准备六类独立发现通道…", 2)
+
+    if STAGE_INDEX(start_stage) <= STAGE_INDEX("recall"):
+        runtime = checkpoint(runtime, batch_id, "recall", state="running", now=now)
+        file_manager.save_v13_runtime(runtime)
+        source_filter = retry_filter if retry_filter else None
+        cache = EvidenceCache(RESEARCH_INTELLIGENCE_CACHE_FILE)
+        cache.initialize()
+        discovered = discover_frontier_candidates_v13(
+            profile_view,
+            journals,
+            cache=cache,
+            source_settings=source_settings,
+            source_health=original.get("source_health", {}),
+            now=now,
+            source_filter=source_filter,
+            progress=lambda message, value=0: emit(str(message), 3 + int((value or 0) * 0.3)),
+        )
+        if retry_filter:
+            discovered["recall_outcomes"] = _merge_retry_recall_outcomes(
+                original.get("recall_outcomes", {}),
+                discovered.get("recall_outcomes", {}),
+                original.get("items", []),
+                discovered.get("attempted_strategies", []),
+            )
+        runtime = record_batch_sources(
+            runtime,
+            batch_id,
+            successful=[str(value) for value in discovered.get("successful_sources", [])],
+            failed=[str(value) for value in discovered.get("failed_sources", [])],
+        )
+        runtime = checkpoint(runtime, batch_id, "recall", payload=discovered, state="success", now=now)
+        file_manager.save_v13_runtime(runtime)
+    else:
+        discovered = deepcopy(runtime["batches"][batch_id]["stages"]["recall"].get("payload", {}))
+
+    if STAGE_INDEX(start_stage) <= STAGE_INDEX("enrich"):
+        runtime = checkpoint(runtime, batch_id, "enrich", state="running", now=now)
+        file_manager.save_v13_runtime(runtime)
+        emit("正在跨来源补全作者、摘要与期刊身份…", 36)
+        incoming = [dict(value) for value in discovered.get("items", []) if isinstance(value, dict)]
+        enriched = _enrich_frontier_quality_with_easyscholar(
+            incoming,
+            journals,
+            progress=lambda message, value=0: emit(str(message), 36 + int((value or 0) * 0.12)),
+        )
+        runtime = checkpoint(runtime, batch_id, "enrich", payload={"items": enriched}, state="success", now=now)
+        file_manager.save_v13_runtime(runtime)
+    else:
+        enriched = [dict(value) for value in runtime["batches"][batch_id]["stages"]["enrich"].get("payload", {}).get("items", []) if isinstance(value, dict)]
+
+    previous_items = [dict(value) for value in original.get("items", []) if isinstance(value, dict)]
+    previous_by_fingerprint = {work_fingerprint(value): value for value in previous_items if work_fingerprint(value)}
+    if STAGE_INDEX(start_stage) <= STAGE_INDEX("deduplicate"):
+        runtime = checkpoint(runtime, batch_id, "deduplicate", state="running", now=now)
+        file_manager.save_v13_runtime(runtime)
+        merged = merge_work_families([*previous_items, *enriched])
+        durable_fields = (
+            "status", "feedback", "feedback_events", "one_line_feedback", "locked", "favorite",
+            "dismissed_from_status", "dismissed_from_feedback", "deprioritized_from_status",
+            "deprioritized_from_feedback", "first_seen_at", "first_seen_date", "recommendation_date",
+            "notified_at", "version_update_notified_at",
+        )
+        for item in merged:
+            fingerprint = work_fingerprint(item)
+            prior = previous_by_fingerprint.get(fingerprint)
+            if prior:
+                for field in durable_fields:
+                    if field in prior:
+                        item[field] = deepcopy(prior[field])
+                item["first_seen_at"] = str(prior.get("first_seen_at", prior.get("first_seen_date", ""))) or item.get("first_seen_at", now.isoformat(timespec="seconds"))
+            else:
+                item["first_seen_at"] = str(item.get("first_seen_at", "")) or now.isoformat(timespec="seconds")
+            item["first_seen_date"] = str(item.get("first_seen_at", ""))[:10]
+            item["last_verified_at"] = now.isoformat(timespec="seconds")
+        runtime = checkpoint(runtime, batch_id, "deduplicate", payload={"items": merged}, state="success", now=now)
+        file_manager.save_v13_runtime(runtime)
+    else:
+        merged = [dict(value) for value in runtime["batches"][batch_id]["stages"]["deduplicate"].get("payload", {}).get("items", []) if isinstance(value, dict)]
+
+    journal_by_name = {
+        canonical_text(value.get("name", "")): value
+        for value in journals
+        if isinstance(value, dict) and str(value.get("name", "")).strip()
+    }
+    if STAGE_INDEX(start_stage) <= STAGE_INDEX("filter"):
+        runtime = checkpoint(runtime, batch_id, "filter", state="running", now=now)
+        file_manager.save_v13_runtime(runtime)
+        emit("正在执行事实检查和信息完整性预检…", 55)
+        filtered: list[dict[str, Any]] = []
+        fingerprints = [dict(value) for value in original.get("fingerprints", []) if isinstance(value, dict)]
+        fingerprint_index = {str(value.get("fingerprint", "")): value for value in fingerprints if str(value.get("fingerprint", ""))}
+        for item in merged:
+            fingerprint = work_fingerprint(item)
+            if not str(item.get("title", "")).strip():
+                if fingerprint:
+                    fingerprint_index[fingerprint] = {"fingerprint": fingerprint, "reason": "missing_title", "kept_at": today_key}
+                continue
+            item["fingerprint"] = fingerprint
+            item.setdefault("candidate_state", "enriching")
+            filtered.append(item)
+        fingerprints = list(fingerprint_index.values())
+        runtime = checkpoint(runtime, batch_id, "filter", payload={"items": filtered, "fingerprints": fingerprints}, state="success", now=now)
+        file_manager.save_v13_runtime(runtime)
+    else:
+        filter_payload = runtime["batches"][batch_id]["stages"]["filter"].get("payload", {})
+        filtered = [dict(value) for value in filter_payload.get("items", []) if isinstance(value, dict)]
+        fingerprints = [dict(value) for value in filter_payload.get("fingerprints", []) if isinstance(value, dict)]
+
+    if STAGE_INDEX(start_stage) <= STAGE_INDEX("score"):
+        runtime = checkpoint(runtime, batch_id, "score", state="running", now=now)
+        file_manager.save_v13_runtime(runtime)
+        emit("正在按双轴 66+34 规则评分…", 66)
+        scored: list[dict[str, Any]] = []
+        removed_fingerprints = {str(value.get("fingerprint", "")) for value in fingerprints}
+        jcr_settings = settings.get("jcr", {}) if isinstance(settings.get("jcr"), dict) else {}
+        jcr_available = bool(
+            (jcr_settings.get("enabled") and jcr_settings.get("api_key_secret") and jcr_settings.get("endpoint_template"))
+            or is_easyscholar_ready()
+        )
+        prepared: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+        for raw in filtered:
+            journal = journal_by_name.get(canonical_text(raw.get("journal", "")))
+            if journal:
+                raw["priority"] = str(journal.get("frontier_priority", raw.get("priority", "")))
+                raw["watched_journal"] = raw.get("watched_journal") or raw["priority"] in {"必看", "关注"}
+                raw["trusted_journal"] = True
+                raw["publisher"] = str(raw.get("publisher", "")) or str(journal.get("publisher", ""))
+            prepared.append((raw, journal))
+
+        def assess(raw: dict[str, Any], journal: dict[str, Any] | None, ai_payload: Any = None) -> dict[str, Any]:
+            item = score_frontier_item(
+                raw,
+                profile,
+                journal,
+                today=now.date(),
+                ai_payload=ai_payload,
+            )
+            decision = frontier_display_decision(
+                item,
+                jcr_service_available=jcr_available,
+                show_preprints=bool(profile.get("show_preprints", True)),
+            )
+            item.update(
+                {
+                    "candidate_state": decision["state"],
+                    "display_reason": decision["reason"],
+                    "missing_fields": decision.get("missing_fields", []),
+                    "display_label": decision.get("label", ""),
+                    "content_decision": "accept" if decision["visible"] else "pending",
+                    "quality_gate_state": "preprint" if item.get("is_preprint") else "eligible" if decision["visible"] else "withheld",
+                }
+            )
+            return item
+
+        for raw, journal in prepared:
+            item = assess(raw, journal, raw.get("ai_axis_payload"))
+            if item["candidate_state"] == "content_deleted_fingerprint_kept":
+                decision_fingerprint = work_fingerprint(item)
+                fingerprints.append(
+                    {
+                        "fingerprint": decision_fingerprint,
+                        "reason": item.get("display_reason", ""),
+                        "kept_at": today_key,
+                        "jcr_quartile": item.get("jcr_quartile", ""),
+                        "source_evidence": deepcopy(item.get("source_evidence", [])),
+                    }
+                )
+                removed_fingerprints.add(decision_fingerprint)
+                continue
+            if item["candidate_state"] == "retained_unshown":
+                first_seen = str(item.get("first_seen_at", ""))[:10]
+                try:
+                    item["enrich_until"] = (date.fromisoformat(first_seen) + timedelta(days=7)).isoformat()
+                except ValueError:
+                    item["enrich_until"] = (now.date() + timedelta(days=7)).isoformat()
+            scored.append(item)
+
+        # Automatic AI review is part of the score stage.  It must finish
+        # before the pyramid sees a candidate; an unavailable AI simply leaves
+        # the valid local 66-point axes in rules-normalized mode.
+        ai_settings = settings.get("ai", {}) if isinstance(settings.get("ai"), dict) else {}
+        ai_errors: list[dict[str, Any]] = []
+        ai_reviewed_count = 0
+        ai_candidate_count = 0
+        if bool(ai_settings.get("auto_frontier_rerank", False)):
+            try:
+                from utils.ai_service import is_ai_transport_failure, is_deepseek_ready, rerank_frontier_with_ai
+
+                ai_ready = is_deepseek_ready("frontier_rerank")
+            except Exception:  # noqa: BLE001 - local scoring remains complete
+                ai_ready = False
+            if ai_ready:
+                ai_candidates = [
+                    value
+                    for value in scored
+                    if value.get("candidate_state") == "visible"
+                    and _frontier_ai_review_candidate(value)
+                    and not (
+                        str(value.get("ai_review_status", "")).casefold() == "success"
+                        and isinstance(value.get("ai_axis_payload"), dict)
+                        and bool(value.get("ai_axis_payload"))
+                    )
+                ]
+                ai_candidate_count = len(ai_candidates)
+                patches: dict[str, dict[str, Any]] = {}
+                chunk_size = FRONTIER_AI_BATCH_SIZE
+                consecutive_transport_failures = 0
+                for offset in range(0, len(ai_candidates), chunk_size):
+                    chunk = ai_candidates[offset : offset + chunk_size]
+                    emit(
+                        f"AI 正在复核候选论文（{offset + 1}-{offset + len(chunk)}/{len(ai_candidates)}）…",
+                        72 + int((offset + len(chunk)) * 10 / max(1, len(ai_candidates))),
+                    )
+                    try:
+                        response = rerank_frontier_with_ai(profile, chunk)
+                    except Exception as error:  # noqa: BLE001 - one AI batch cannot erase rule results
+                        row = {
+                            "start": offset + 1,
+                            "end": offset + len(chunk),
+                            "error_type": type(error).__name__,
+                            "error": str(error)[:240],
+                        }
+                        ai_errors.append(row)
+                        consecutive_transport_failures = (
+                            consecutive_transport_failures + 1 if is_ai_transport_failure(error) else 0
+                        )
+                        if consecutive_transport_failures >= 2:
+                            row["circuit_open"] = True
+                            break
+                        continue
+                    consecutive_transport_failures = 0
+                    returned_ids: set[str] = set()
+                    for patch in response.get("ranked", []) if isinstance(response, dict) else []:
+                        if isinstance(patch, dict) and str(patch.get("id", "")):
+                            item_id = str(patch["id"])
+                            patches[item_id] = patch
+                            returned_ids.add(item_id)
+                    expected_ids = {str(value.get("id", "")) for value in chunk if str(value.get("id", ""))}
+                    missing_ids = sorted(expected_ids - returned_ids)
+                    if missing_ids:
+                        ai_errors.append(
+                            {
+                                "start": offset + 1,
+                                "end": offset + len(chunk),
+                                "error_type": "partial_response",
+                                "error": f"AI 未返回 {len(missing_ids)} 篇候选的复核结果",
+                                "missing_ids": missing_ids,
+                            }
+                        )
+                rescored: list[dict[str, Any]] = []
+                ai_candidate_ids = {str(value.get("id", "")) for value in ai_candidates}
+                prepared_by_id = {
+                    str(raw.get("id", "")): (raw, journal)
+                    for raw, journal in prepared
+                    if str(raw.get("id", ""))
+                }
+                for item in scored:
+                    item_id = str(item.get("id", ""))
+                    patch = patches.get(item_id)
+                    source_pair = prepared_by_id.get(item_id)
+                    if patch is None or source_pair is None:
+                        if item_id in ai_candidate_ids:
+                            item["ai_review_status"] = "partial" if ai_errors else "not_returned"
+                        elif item.get("candidate_state") == "visible":
+                            item["ai_review_status"] = "not_required"
+                        rescored.append(item)
+                        continue
+                    raw, journal = source_pair
+                    reviewed = assess(raw, journal, patch.get("ai_axis_payload"))
+                    reviewed["ai_axis_payload"] = deepcopy(patch.get("ai_axis_payload", {}))
+                    reviewed["ai_summary_cn"] = str(patch.get("summary_cn", "")).strip()
+                    reviewed["ai_review_status"] = "success"
+                    ai_reviewed_count += 1
+                    rescored.append(reviewed)
+                scored = rescored
+        eligible = [value for value in scored if value.get("candidate_state") == "visible"]
+        pyramid = dynamic_pyramid(eligible, today=now.date())
+        visible_ids = {str(value.get("id", "")) for value in pyramid}
+        for item in scored:
+            if item.get("candidate_state") == "visible" and str(item.get("id", "")) not in visible_ids:
+                item["candidate_state"] = "retained_unshown"
+                item["display_reason"] = "dual_low_or_outside_pyramid"
+                item["content_decision"] = "pending"
+        pyramid_by_id = {str(value.get("id", "")): value for value in pyramid}
+        scored = [pyramid_by_id.get(str(value.get("id", "")), value) for value in scored]
+        display_rows, unread_fingerprints = apply_unread_policy(
+            [value for value in scored if value.get("candidate_state") == "visible"],
+            today=now.date(),
+            retain_unread=bool(profile.get("retain_unread", True)),
+        )
+        display_ids = {str(value.get("id", "")) for value in display_rows}
+        for item in scored:
+            if item.get("candidate_state") == "visible" and str(item.get("id", "")) not in display_ids:
+                item["candidate_state"] = "content_deleted_fingerprint_kept"
+        fingerprints.extend(unread_fingerprints)
+        deduped_fingerprints = {
+            str(value.get("fingerprint", "")): value
+            for value in fingerprints
+            if str(value.get("fingerprint", ""))
+        }
+        # Reattach bucket labels produced by the rollover policy.
+        display_by_id = {str(value.get("id", "")): value for value in display_rows}
+        final_items: list[dict[str, Any]] = []
+        for item in scored:
+            if item.get("candidate_state") == "content_deleted_fingerprint_kept":
+                continue
+            final_items.append(display_by_id.get(str(item.get("id", "")), item))
+        # The SQLite evidence store remains the complete candidate pool.  The
+        # JSON document only keeps user-visible/user-owned rows and the active
+        # fuzzy-boundary working set; otherwise one discovery run can add tens
+        # of megabytes of hidden cards to every subsequent load.
+        compacted_items: list[dict[str, Any]] = []
+        offloaded_count = 0
+        for item in final_items:
+            state = str(item.get("candidate_state", ""))
+            status = str(item.get("status", "")).casefold()
+            user_owned = bool(
+                item.get("locked")
+                or item.get("favorite")
+                or status in {"saved", "read", "dismissed", "deprioritized"}
+            )
+            active_working_set = state == "retained_unshown" and _frontier_ai_review_candidate(item)
+            if state == "visible" or user_owned or active_working_set:
+                compacted_items.append(item)
+            else:
+                offloaded_count += 1
+        final_items = compacted_items
+        ai_review_summary = {
+            "candidate_count": ai_candidate_count,
+            "reviewed_count": ai_reviewed_count,
+            "failed_batches": len(ai_errors),
+            "errors": deepcopy(ai_errors),
+            "batch_size": FRONTIER_AI_BATCH_SIZE,
+        }
+        candidate_pool_summary = {
+            "stored_in_json": len(final_items),
+            "offloaded_to_sqlite": offloaded_count,
+            "full_pool_backend": "research_intelligence.sqlite",
+        }
+        runtime = checkpoint(
+            runtime,
+            batch_id,
+            "score",
+            payload={
+                "items": final_items,
+                "fingerprints": list(deduped_fingerprints.values()),
+                "ai_review": ai_review_summary,
+                "candidate_pool": candidate_pool_summary,
+            },
+            state="success",
+            now=now,
+        )
+        file_manager.save_v13_runtime(runtime)
+    else:
+        score_payload = runtime["batches"][batch_id]["stages"]["score"].get("payload", {})
+        final_items = [dict(value) for value in score_payload.get("items", []) if isinstance(value, dict)]
+        fingerprints = [dict(value) for value in score_payload.get("fingerprints", []) if isinstance(value, dict)]
+        ai_review_summary = deepcopy(score_payload.get("ai_review", {}))
+        candidate_pool_summary = deepcopy(score_payload.get("candidate_pool", {}))
+
+    visible = [value for value in final_items if value.get("candidate_state") == "visible"]
+    today_rows = [value for value in visible if value.get("display_bucket") == "today"]
+    previous_unread = [value for value in visible if value.get("display_bucket") == "previous_unread"]
+    levels = {level: sum(1 for value in visible if value.get("pyramid_level") == level) for level in ("A", "B", "C")}
+    errors = _aggregate_frontier_errors(discovered.get("errors", []))
+    brief = f"今日新增 {len(today_rows)} 篇；此前未读 {len(previous_unread)} 篇；A/B/C 为 {levels['A']}/{levels['B']}/{levels['C']}"
+    if errors:
+        brief += f"；{len({value.get('source') for value in errors})} 个来源待补跑"
+    brief += "。"
+    stored_profile = deepcopy(profile)
+    stored_profile.pop("authored_papers", None)
+    result_data = {
+        **original,
+        "profile": stored_profile,
+        "items": final_items,
+        "fingerprints": fingerprints,
+        "last_checked": today_key,
+        "last_success_at": now.isoformat(timespec="seconds") if not errors else str(original.get("last_success_at", "")),
+        "algorithm_version": FRONTIER_ALGORITHM_VERSION,
+        "profile_signature": frontier_profile_signature_v11(profile, journals),
+        "source_health": deepcopy(discovered.get("source_health", {})),
+        "source_watermarks": {
+            source: str(value.get("successful_watermark", ""))
+            for source, value in discovered.get("source_health", {}).items()
+            if isinstance(value, dict)
+        },
+        "recall_outcomes": deepcopy(discovered.get("recall_outcomes", {})),
+        "ai_review": ai_review_summary,
+        "candidate_pool": candidate_pool_summary,
+        "last_batch_id": batch_id,
+    }
+    emit("每日前沿 13.0 已完成评分，正在事务提交…", 98)
+    return {
+        "data": result_data,
+        "new_count": len(today_rows),
+        "visible_count": len(visible),
+        "brief": brief,
+        "errors": errors,
+        "recall_outcomes": deepcopy(discovered.get("recall_outcomes", {})),
+        "source_health": deepcopy(discovered.get("source_health", {})),
+        "ai_review": ai_review_summary,
+        "candidate_pool": candidate_pool_summary,
+        "runtime": runtime,
+        "batch_id": batch_id,
+        "resumed": resumed,
+        "already_succeeded": False,
+    }
+
+
+def STAGE_INDEX(stage: str) -> int:
+    """Small local helper avoiding a hard dependency in legacy import paths."""
+    order = {"recall": 0, "enrich": 1, "deduplicate": 2, "filter": 3, "score": 4, "commit": 5}
+    return order.get(str(stage), 0)

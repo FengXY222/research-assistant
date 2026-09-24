@@ -231,6 +231,36 @@ class EvidenceCache:
                 (key, _json_dumps(payload), datetime.now().isoformat(timespec="seconds")),
             )
 
+    def _put_payloads(
+        self,
+        table: str,
+        key_column: str,
+        values: list[tuple[str, dict[str, Any]]],
+    ) -> None:
+        """Upsert one logical batch in a single SQLite transaction."""
+
+        if not values:
+            return
+        collapsed: dict[str, dict[str, Any]] = {}
+        for key, payload in values:
+            normalized_key = str(key)
+            if normalized_key and isinstance(payload, dict):
+                collapsed[normalized_key] = payload
+        updated_at = datetime.now().isoformat(timespec="seconds")
+        rows = [
+            (str(key), _json_dumps(payload), updated_at)
+            for key, payload in collapsed.items()
+        ]
+        if not rows:
+            return
+        with self._session() as connection:
+            connection.executemany(
+                f"""INSERT INTO {table}({key_column}, payload_json, updated_at) VALUES (?, ?, ?)
+                    ON CONFLICT({key_column}) DO UPDATE SET
+                      payload_json=excluded.payload_json, updated_at=excluded.updated_at""",
+                rows,
+            )
+
     def _get_payload(self, table: str, key_column: str, key: str) -> dict[str, Any] | None:
         with self._session() as connection:
             row = connection.execute(
@@ -244,6 +274,9 @@ class EvidenceCache:
 
     def put_special_issue_discovery(self, issue_key: str, payload: dict[str, Any]) -> None:
         self._put_payload("special_issue_discovery", "issue_key", issue_key, payload)
+
+    def put_special_issue_discoveries(self, values: list[tuple[str, dict[str, Any]]]) -> None:
+        self._put_payloads("special_issue_discovery", "issue_key", values)
 
     def get_special_issue_discovery(self, issue_key: str) -> dict[str, Any] | None:
         return self._get_payload("special_issue_discovery", "issue_key", issue_key)

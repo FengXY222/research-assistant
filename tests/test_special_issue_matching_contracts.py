@@ -91,12 +91,31 @@ def test_missing_paper_scores_remain_pending_without_inheritance():
     assert all(row["status"] == "pending" and row["score"] is None for row in value["paper_matches"])
 
 
-@pytest.mark.parametrize("fields", [{"scope_text": ""}, {"scope_is_complete": False, "scope_status": "snippet"}])
-def test_incomplete_scope_does_not_call_ai(fields):
+@pytest.mark.parametrize("fields", [
+    {"scope_text": "", "scope_paragraphs": [], "scope_is_complete": False, "scope_status": "missing"},
+    {"scope_is_complete": False, "scope_status": "snippet"},
+])
+def test_incomplete_scope_uses_explicit_metadata_inference(fields):
     called = []
-    value = matching.match_special_issue(issue(**fields), profiles(), ai_matcher=lambda *_: called.append(True))
-    assert called == []
-    assert value["status"] == "awaiting_scope" and value["formal"] is False
+
+    def matcher(item, *_args):
+        called.append(item)
+        refs = [row["id"] for row in item["scope_paragraphs"]]
+        return response(
+            scope_coverage=refs,
+            evidence_refs=[refs[0]],
+            exclusion_assessment={"status": "none", "reason": "No exclusion applies.", "evidence_refs": []},
+            paper_matches=[
+                {"paper_id": paper_id, **assessment(80, refs=[refs[0]])}
+                for paper_id in ("paper-a", "paper-b")
+            ],
+        )
+
+    value = matching.match_special_issue(issue(**fields), profiles(), ai_matcher=matcher)
+    assert called and called[0]["assessment_basis"] == "metadata_inference"
+    assert value["assessment_basis"] == "metadata_inference"
+    assert value["scope_complete"] is False
+    assert value["status"] != "awaiting_scope"
 
 
 @pytest.mark.parametrize("change", [

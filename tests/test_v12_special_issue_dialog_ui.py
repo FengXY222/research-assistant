@@ -35,7 +35,13 @@ def _issue(
         "issns": ["1234-5678"],
         "official_url": f"https://example.org/{issue_id}",
         "discovery_urls": [f"https://aggregator.example/{issue_id}"],
-        "source_evidence": [{"source": "official", "url": f"https://example.org/{issue_id}", "fetched_at": "2026-08-31"}],
+        "source_evidence": [{
+            "source": "aggregator" if verified == "aggregator_unverified" else "official",
+            "url": f"https://example.org/{issue_id}",
+            "fetched_at": "2026-08-31",
+            "published_at": "2026-08-31T08:00:00",
+            "is_aggregator": verified == "aggregator_unverified",
+        }],
         "scope_text": f"Complete aims and scope for {title}: soil organic carbon mapping and remote sensing.",
         "scope_text_zh": f"{title} 的完整征稿范围：土壤有机碳制图与遥感。",
         "deadline": "2027-06-30",
@@ -106,11 +112,13 @@ class SpecialIssueDialogUiTests(TestCase):
         result_list = self.dialog.findChild(QListWidget, "specialResultList")
         self.assertGreater(result_list.width(), 300)
         self.assertGreater(self.dialog.findChild(QWidget, "specialDetailPane").width(), 450)
+        self.assertTrue(self.dialog.filter_panel.isHidden())
 
     def test_all_result_tabs_remain_visible_without_scroll_arrows(self) -> None:
         tabs = self.dialog.view_tabs
         self.assertFalse(tabs.usesScrollButtons())
-        self.assertEqual(tabs.count(), 5)
+        self.assertEqual(tabs.count(), 4)
+        self.assertNotIn("unverified", [tabs.tabData(index) for index in range(tabs.count())])
         for index in range(tabs.count()):
             rect = tabs.tabRect(index)
             self.assertGreaterEqual(rect.width(), 48)
@@ -163,7 +171,7 @@ class SpecialIssueDialogUiTests(TestCase):
         saved = self.dialog.row_for_issue("saved")
         self.assertIn("已收藏", saved.summary_text())
 
-        self.dialog.view_tabs.setCurrentIndex(2)
+        self.dialog.view_tabs.setCurrentIndex(0)
         self.application.processEvents()
         unverified = self.dialog.row_for_issue("unverified")
         self.assertIn("待核验", unverified.summary_text())
@@ -177,7 +185,7 @@ class SpecialIssueDialogUiTests(TestCase):
         )
         long_issue["journal"] = "International Journal of Applied Earth Observation and Geoinformation"
         self.dialog.reload_data({"items": [long_issue]}, [long_issue], self.papers)
-        self.dialog.view_tabs.setCurrentIndex(2)
+        self.dialog.view_tabs.setCurrentIndex(0)
         self.application.processEvents()
 
         row = self.dialog.row_for_issue("long-row")
@@ -223,7 +231,7 @@ class SpecialIssueDialogUiTests(TestCase):
         self.assertEqual(calls, [("known", "我认为该征稿更适合土壤碳制图方法论文。")])
         issue_actions = self.dialog.findChild(QWidget, "specialIssueActions")
         paper_actions = self.dialog.findChild(QWidget, "specialPaperActions")
-        self.assertIs(self.dialog.findChild(QPushButton, "specialSaveButton").parentWidget(), issue_actions)
+        self.assertIs(self.dialog.findChild(QPushButton, "specialSaveButton").parentWidget(), paper_actions)
         self.assertIs(self.dialog.findChild(QPushButton, "specialIgnoreButton").parentWidget(), issue_actions)
         self.assertIs(self.dialog.findChild(QComboBox, "specialPaperSelector").parentWidget(), paper_actions)
 
@@ -245,11 +253,11 @@ class SpecialIssueDialogUiTests(TestCase):
         self.assertEqual(calls[-1], ("ignored", "restored"))
 
     def test_closed_issue_keeps_library_and_association_but_disables_new_deadline_actions(self) -> None:
-        closed = _issue("closed", "Closed call", verified="closed")
+        closed = _issue("closed", "Closed call", verified="closed", status="saved")
         closed["call_status"] = "closed"
         self.dialog.reload_data({"items": [closed]}, [closed], self.papers)
-        changed_index = next(index for index in range(self.dialog.view_tabs.count()) if self.dialog.view_tabs.tabData(index) == "unverified")
-        self.dialog.view_tabs.setCurrentIndex(changed_index)
+        saved_index = next(index for index in range(self.dialog.view_tabs.count()) if self.dialog.view_tabs.tabData(index) == "saved")
+        self.dialog.view_tabs.setCurrentIndex(saved_index)
         self.dialog.select_issue("closed")
         self.assertTrue(self.dialog.findChild(QPushButton, "specialLibraryButton").isEnabled())
         self.assertTrue(self.dialog.findChild(QPushButton, "specialAssociateButton").isEnabled())
@@ -268,7 +276,21 @@ class SpecialIssueDialogUiTests(TestCase):
             self.assertLessEqual(bottom_right.x(), bounds.right() + 1, widget.objectName())
             self.assertLessEqual(bottom_right.y(), bounds.bottom() + 1, widget.objectName())
         for object_name in ("specialAssociateButton", "specialPathButton", "specialTaskButton"):
-            self.assertTrue(self.dialog.findChild(QPushButton, object_name).isVisible())
+            button = self.dialog.findChild(QPushButton, object_name)
+            if object_name == "specialPathButton":
+                self.assertTrue(button.isVisible())
+            else:
+                self.assertTrue(button.isHidden())
+
+    def test_empty_results_hide_the_editor_and_action_surfaces(self) -> None:
+        self.dialog.reload_data({"items": []}, [], self.papers)
+        self.application.processEvents()
+
+        self.assertTrue(self.dialog.empty_detail.isVisible())
+        self.assertTrue(self.dialog.scope_view.isHidden())
+        self.assertFalse(self.dialog.personal_scope_note.isVisible())
+        self.assertTrue(self.dialog.issue_actions.isHidden())
+        self.assertTrue(self.dialog.paper_actions.isHidden())
 
     def test_refresh_progress_can_be_cancelled_without_closing_workbench(self) -> None:
         calls: list[str] = []

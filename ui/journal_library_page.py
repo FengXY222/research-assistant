@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from uuid import uuid4
 
-from PySide6.QtCore import QThread, QUrl, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices, QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.page_kit import ElidedLabel, FilterBar, PageHeader
 from ui.dialogs import confirm_delete, show_undo_toast
 from ui.ai_progress import AiProgressPanel
 from ui.journal_selection_dialog import JournalSelectionDialog
@@ -44,6 +45,7 @@ from utils.ai_service import (
     rank_journals_with_ai,
 )
 from utils.easyscholar_service import (
+    easyscholar_readiness,
     EasyScholarConfigurationError,
     EasyScholarRequestError,
     enrich_journals_with_easyscholar,
@@ -56,9 +58,7 @@ from utils.file_manager import (
     load_app_settings,
     load_frontier_data,
     load_journal_library,
-    load_journal_selection_feedback,
     load_papers,
-    set_journal_selection_feedback,
     save_papers,
     save_app_settings,
     save_journal_library,
@@ -88,30 +88,6 @@ from utils.jcr_service import (
 def _journal_key(name: str, publisher: str = "") -> str:
     return f"{name.strip().casefold()}|{publisher.strip().casefold()}"
 
-
-class ElidedLabel(QLabel):
-    """A one-line metadata label that preserves the full value in a tooltip."""
-
-    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._full_text = ""
-        self.setWordWrap(False)
-        self.setMinimumWidth(0)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.set_full_text(text)
-
-    def set_full_text(self, text: str) -> None:
-        self._full_text = str(text)
-        self.setToolTip(self._full_text)
-        self._refresh_text()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._refresh_text()
-
-    def _refresh_text(self) -> None:
-        width = max(1, self.contentsRect().width())
-        QLabel.setText(self, QFontMetrics(self.font()).elidedText(self._full_text, Qt.TextElideMode.ElideRight, width))
 
 
 class JournalMetadataThread(QThread):
@@ -568,320 +544,6 @@ class JournalPickerRow(QFrame):
         root.addLayout(feedback_row)
 
 
-class JournalPickerDialog(QDialog):
-    """Turn the library into a lightweight, local journal selection assistant."""
-
-    def __init__(self, papers: list[dict], journals: list[dict], parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.papers = papers
-        self.journals = journals
-        self.usage = journal_usage_index(papers)
-        self.feedback = load_journal_selection_feedback()
-        self._selected_journal_id = ""
-        self._ai_results: dict[str, dict] = {}
-        self._ai_worker: JournalPickerAiThread | None = None
-        self.setWindowTitle("为论文选刊")
-        parent_width = parent.width() if parent else 560
-        self.setMinimumWidth(390)
-        self.setMaximumWidth(max(390, min(720, parent_width - 16)))
-        self.resize(max(390, min(620, parent_width - 16)), 620)
-        self.setStyleSheet(
-            """
-            QDialog { background: #111b2d; color: #edf4ff; }
-            QLabel { color: #edf4ff; }
-            #pickerTitle { color: #ffffff; font-size: 19px; font-weight: 700; }
-            #pickerHint { color: #9aacc6; font-size: 11px; }
-            QLineEdit, QComboBox { background: #17263d; color: #f2f7ff; border: 1px solid #38506f; border-radius: 7px; padding: 7px 9px; }
-            QComboBox QAbstractItemView { background: #17263d; color: #ffffff; selection-background-color: #31577f; selection-color: #ffffff; border: 1px solid #70c9ff; outline: 0; }
-            QComboBox QAbstractItemView::item { min-height: 24px; padding: 5px 10px; color: #ffffff; }
-            QComboBox QAbstractItemView::item:selected { background: #31577f; color: #ffffff; }
-            #pickerJournalRow { background: #182842; border: 1px solid #2e4666; border-radius: 8px; }
-            #journalScore { color: #8ad7ff; background: rgba(58,156,221,42); border-radius: 8px; padding: 3px 6px; font-size: 10px; }
-            #pickerRank { color: #8aa4c7; font-size: 11px; font-weight: 700; padding-top: 2px; }
-            #subtleButton { background: #273a57; color: #e8f2ff; border: 1px solid #3d587e; border-radius: 7px; padding: 6px 8px; }
-            """
-        )
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 18)
-        root.setSpacing(9)
-        title = QLabel("为论文选刊")
-        title.setObjectName("pickerTitle")
-        root.addWidget(title)
-        hint = QLabel("先用可解释的本地分筛选，再由 AI 复核候选。分数用于比较适配度，不代表录用概率。")
-        hint.setObjectName("pickerHint")
-        hint.setWordWrap(True)
-        root.addWidget(hint)
-        self.paper_combo = QComboBox()
-        for paper in papers:
-            self.paper_combo.addItem(str(paper.get("title", "未命名论文")), str(paper.get("id", "")))
-        self.paper_combo.currentIndexChanged.connect(self._sync_keywords)
-        root.addWidget(self.paper_combo)
-        self.keywords_edit = QLineEdit()
-        self.keywords_edit.setPlaceholderText("论文关键词，例如：SOC、遥感、机器学习")
-        self.keywords_edit.textChanged.connect(self._render)
-        root.addWidget(self.keywords_edit)
-        self.summary_label = QLabel()
-        self.summary_label.setObjectName("pickerHint")
-        self.summary_label.setWordWrap(True)
-        root.addWidget(self.summary_label)
-        filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("候选范围"))
-        self.candidate_filter = QComboBox()
-        self.candidate_filter.addItems(["全部候选", "仅优先期刊", "仅 JCR 已核验", "显示不适合期刊"])
-        self.candidate_filter.currentTextChanged.connect(self._render)
-        filter_row.addWidget(self.candidate_filter, 1)
-        root.addLayout(filter_row)
-        self.quality_hint = QLabel()
-        self.quality_hint.setObjectName("pickerHint")
-        self.quality_hint.setWordWrap(True)
-        root.addWidget(self.quality_hint)
-        ai_row = QHBoxLayout()
-        self.ai_hint = QLabel("可对本地筛选出的候选期刊进行一次 DeepSeek 适配复核。")
-        self.ai_hint.setObjectName("pickerHint")
-        self.ai_hint.setWordWrap(True)
-        ai_row.addWidget(self.ai_hint, 1)
-        self.ai_button = QPushButton("AI 复核")
-        self.ai_button.setObjectName("subtleButton")
-        self.ai_button.setToolTip("发送当前论文摘要和本地前 20 个候选期刊至 DeepSeek 重新排序")
-        self.ai_button.clicked.connect(self._run_ai_rerank)
-        ai_row.addWidget(self.ai_button)
-        root.addLayout(ai_row)
-        self.ai_progress = AiProgressPanel(object_name="journalPickerAiProgress")
-        root.addWidget(self.ai_progress)
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.content = QWidget()
-        self.rows = QVBoxLayout(self.content)
-        self.rows.setContentsMargins(1, 1, 5, 1)
-        self.rows.setSpacing(6)
-        self.rows.addStretch()
-        self.scroll.setWidget(self.content)
-        root.addWidget(self.scroll, 1)
-        cancel = QPushButton("取消")
-        cancel.setObjectName("subtleButton")
-        cancel.clicked.connect(self.reject)
-        root.addWidget(cancel, alignment=Qt.AlignmentFlag.AlignRight)
-        self._sync_keywords()
-
-    def _current_paper(self) -> dict | None:
-        paper_id = str(self.paper_combo.currentData())
-        return next((item for item in self.papers if str(item.get("id")) == paper_id), None)
-
-    def _sync_keywords(self) -> None:
-        paper = self._current_paper()
-        if paper:
-            self.keywords_edit.blockSignals(True)
-            self.keywords_edit.setText(", ".join(str(item) for item in paper.get("keywords", []) if str(item).strip()))
-            self.keywords_edit.blockSignals(False)
-            summary = str(paper.get("summary", "")).strip()
-            self.summary_label.setText(
-                "研究摘要：" + (summary[:180] + ("…" if len(summary) > 180 else ""))
-                if summary
-                else "研究摘要尚未填写：可在论文编辑中补充，或使用“AI 补全”生成草稿。"
-            )
-        else:
-            self.summary_label.setText("")
-        self._render()
-
-    def _keyword_terms(self) -> list[str]:
-        return [item.strip().casefold() for item in self.keywords_edit.text().replace("，", ",").split(",") if item.strip()]
-
-    def _feedback_label(self, journal: dict) -> str:
-        paper = self._current_paper()
-        if paper is None:
-            return ""
-        key = f"{paper.get('id', '')}:{journal.get('id', '')}"
-        entry = self.feedback.get("entries", {}).get(key, {})
-        return str(entry.get("label", "")) if isinstance(entry, dict) else ""
-
-    def _score(self, journal: dict) -> tuple[int, list[str], str]:
-        words = self._keyword_terms()
-        searchable = [
-            *[str(item).strip() for item in journal.get("fields", []) if str(item).strip()],
-            *[str(item).strip() for item in journal.get("ai_tags", []) if str(item).strip()],
-            str(journal.get("ai_scope_cn", "")).strip(),
-            str(journal.get("ai_fit_cn", "")).strip(),
-            str(journal.get("notes", "")).strip(),
-        ]
-        haystack = " ".join(searchable).casefold()
-        matches = [word for word in words if word in haystack]
-        priority = str(journal.get("frontier_priority", "不订阅"))
-        priority_score = {"必看": 100, "关注": 70, "扩展": 30, "不订阅": 0}.get(priority, 0)
-        field_score = min(80, len(matches) * 25)
-        key = _journal_key(str(journal.get("name", "")), str(journal.get("publisher", "")))
-        usage = self.usage.get(key, {"submission_count": 0, "last_used_at": ""})
-        experience_score = min(int(usage.get("submission_count", 0)), 5) * 4
-        jcr = journal.get("jcr", {})
-        jcr = jcr if isinstance(jcr, dict) else {}
-        quartile = primary_jcr_quartile(journal) if jcr.get("status") == "verified" else ""
-        jcr_score = {"Q1": 20, "Q2": 14, "Q3": 8, "Q4": 4}.get(quartile, 0)
-        feedback_label = self._feedback_label(journal)
-        direct_feedback_score = {"适合": 22, "暂不考虑": -8, "不适合": -70}.get(feedback_label, 0)
-        weights = self.feedback.get("term_weights", {}) if isinstance(self.feedback.get("term_weights", {}), dict) else {}
-        learned_score = max(-30, min(30, sum(int(weights.get(word, 0) or 0) for word in matches)))
-        score = priority_score + field_score + experience_score + jcr_score + direct_feedback_score + learned_score
-        parts = []
-        if priority_score:
-            parts.append(f"{priority} +{priority_score}")
-        if field_score:
-            parts.append(f"关键词 +{field_score}")
-        if experience_score:
-            parts.append(f"个人经历 +{experience_score}")
-        if jcr_score:
-            parts.append(f"JCR {quartile} +{jcr_score}")
-        if direct_feedback_score:
-            parts.append(f"你的反馈 {direct_feedback_score:+d}")
-        if learned_score:
-            parts.append(f"学习偏好 {learned_score:+d}")
-        return score, matches, " + ".join(parts) if parts else "待补充方向或优先级"
-
-    def _ranked(self) -> list[tuple[dict, int, list[str], str]]:
-        scope = self.candidate_filter.currentText() if hasattr(self, "candidate_filter") else "全部候选"
-        candidates: list[dict] = []
-        for journal in self.journals:
-            feedback_label = self._feedback_label(journal)
-            if scope == "仅优先期刊" and str(journal.get("frontier_priority", "")) not in {"必看", "关注"}:
-                continue
-            jcr = journal.get("jcr", {})
-            jcr = jcr if isinstance(jcr, dict) else {}
-            if scope == "仅 JCR 已核验" and str(jcr.get("status", "")) != "verified":
-                continue
-            if scope == "显示不适合期刊":
-                if feedback_label != "不适合":
-                    continue
-            elif feedback_label == "不适合":
-                continue
-            candidates.append(journal)
-        ranked = [(journal, *self._score(journal)) for journal in candidates]
-        ranked.sort(
-            key=lambda item: (
-                -int(str(item[0].get("id", "")) in self._ai_results),
-                -int(self._ai_results.get(str(item[0].get("id", "")), {}).get("score", -1)),
-                -item[1],
-                str(item[0].get("name", "")).casefold(),
-            )
-        )
-        return ranked
-
-    def _render(self) -> None:
-        while self.rows.count() > 1:
-            child = self.rows.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-        ranked = self._ranked()
-        paper = self._current_paper()
-        self.quality_hint.setText(
-            "提示：这篇论文还没有关键词，排序会更多依赖优先期刊、JCR 与个人经历；建议先补充关键词。"
-            if paper and not paper.get("keywords")
-            else "评分说明：优先期刊、关键词匹配、已核验 JCR、投稿经历及你的反馈共同决定本地排序。"
-        )
-        for rank_index, (journal, score, matches, reason) in enumerate(ranked, 1):
-            usage = self.usage.get(
-                _journal_key(str(journal.get("name", "")), str(journal.get("publisher", ""))),
-                {"submission_count": 0, "last_used_at": ""},
-            )
-            row = JournalPickerRow(
-                journal,
-                score,
-                matches,
-                usage,
-                reason,
-                self._ai_results.get(str(journal.get("id", ""))),
-                self._feedback_label(journal),
-                rank_index,
-            )
-            row.selected.connect(self._select)
-            row.feedback_requested.connect(self._record_feedback)
-            self.rows.insertWidget(self.rows.count() - 1, row)
-        if not ranked:
-            empty = QLabel("期刊库为空，先添加一条期刊记录。")
-            empty.setObjectName("pickerHint")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.rows.insertWidget(0, empty)
-
-    def _run_ai_rerank(self) -> None:
-        if self._ai_worker is not None and self._ai_worker.isRunning():
-            return
-        self.ai_progress.begin("正在检查 AI 配置…")
-        self.ai_button.setEnabled(False)
-        self.ai_button.setText("AI 复核中…")
-        if not is_deepseek_ready("journal_recommendation"):
-            self.ai_hint.setText("尚未配置 DeepSeek。请在“设置 → 智能增强与 JCR”填写 API Key 后再试。")
-            self.ai_progress.fail("AI 选刊复核未配置，未开始处理。")
-            self.ai_button.setEnabled(True)
-            self.ai_button.setText("AI 复核")
-            return
-        paper = self._current_paper()
-        if paper is None:
-            self.ai_hint.setText("请先选择一篇论文。")
-            self.ai_progress.fail("请先选择一篇论文。")
-            self.ai_button.setEnabled(False)
-            self.ai_button.setText("AI 复核")
-            return
-        shortlist = [item[0] for item in self._ranked()[:20]]
-        self.ai_button.setEnabled(False)
-        self.ai_progress.update("DeepSeek 正在复核候选期刊…", 5)
-        self.ai_hint.setText("DeepSeek 正在复核候选期刊…")
-        self._ai_worker = JournalPickerAiThread(paper, shortlist, self)
-        self._ai_worker.progress.connect(self._ai_rerank_progress)
-        self._ai_worker.completed.connect(self._ai_rerank_finished)
-        self._ai_worker.failed.connect(self._ai_rerank_failed)
-        self._ai_worker.finished.connect(self._clear_ai_worker)
-        self._ai_worker.start()
-
-    def _ai_rerank_finished(self, result: dict) -> None:
-        ranked = result.get("ranked", [])
-        self._ai_results = {
-            str(item.get("id", "")): dict(item)
-            for item in ranked
-            if isinstance(item, dict) and str(item.get("id", ""))
-        }
-        self.ai_hint.setText(f"DeepSeek 已复核 {len(self._ai_results)} 本候选期刊；AI 分数优先、本地分数用于并列排序。")
-        self.ai_progress.complete("AI 期刊复核完成。")
-        self._render()
-
-    def _ai_rerank_failed(self, message: str) -> None:
-        self.ai_hint.setText("AI 复核失败：" + str(message))
-        self.ai_progress.fail("AI 复核失败：" + str(message))
-
-    def _ai_rerank_progress(self, message: str, value: int) -> None:
-        self.ai_hint.setText(str(message))
-        self.ai_progress.update(str(message), int(value))
-
-    def _clear_ai_worker(self) -> None:
-        if self._ai_worker is not None:
-            self._ai_worker.deleteLater()
-        self._ai_worker = None
-        self.ai_button.setEnabled(True)
-        self.ai_button.setText("AI 复核")
-
-    def _select(self, journal_id: str) -> None:
-        # Choosing a target journal is the clearest positive signal.  Store it
-        # before closing so the next opening already reflects the preference.
-        self._record_feedback(journal_id, "适合", refresh=False)
-        self._selected_journal_id = journal_id
-        self.accept()
-
-    def _record_feedback(self, journal_id: str, label: str, refresh: bool = True) -> None:
-        paper = self._current_paper()
-        journal = next((item for item in self.journals if str(item.get("id", "")) == journal_id), None)
-        if paper is None or journal is None:
-            return
-        _score, matches, _reason = self._score(journal)
-        try:
-            set_journal_selection_feedback(str(paper.get("id", "")), journal_id, label, matches)
-        except ValueError:
-            return
-        self.feedback = load_journal_selection_feedback()
-        self.ai_hint.setText(f"已记录“{label}”反馈；后续会在这篇论文及相近关键词的选刊中体现。")
-        if refresh:
-            self._render()
-
-    def selection(self) -> tuple[str, str]:
-        return str(self.paper_combo.currentData()), self._selected_journal_id
-
-
 class CompactJournalRow(QFrame):
     """One dense row: name stays dominant; infrequent actions live in a menu."""
 
@@ -1135,11 +797,13 @@ class JournalLibraryRow(QFrame):
 
 class JournalLibraryPage(QWidget):
     changed = Signal()
+    settings_center_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.journals: list[dict] = []
         self.usage: dict[str, dict] = {}
+        self._usage_by_name: dict[str, dict] = {}
         self._metadata_worker: JournalMetadataThread | None = None
         self._metadata_target_ids: set[str] | None = None
         self._metadata_purpose = "metadata"
@@ -1151,6 +815,10 @@ class JournalLibraryPage(QWidget):
         self._ai_worker: JournalAiEnrichmentThread | None = None
         self._ai_automatic = False
         self._library_compact: bool | None = None
+        self._search_render_timer = QTimer(self)
+        self._search_render_timer.setSingleShot(True)
+        self._search_render_timer.setInterval(240)
+        self._search_render_timer.timeout.connect(self._render)
         self._build_ui()
         self.reload()
 
@@ -1158,73 +826,41 @@ class JournalLibraryPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 12)
         root.setSpacing(8)
-        self.heading_widget = QWidget()
-        self.heading_layout = QGridLayout(self.heading_widget)
-        self.heading_layout.setContentsMargins(0, 0, 0, 0)
-        self.heading_layout.setHorizontalSpacing(8)
-        self.heading_layout.setVerticalSpacing(5)
-        self.title_box_widget = QWidget()
-        title_box = QVBoxLayout(self.title_box_widget)
-        title_box.setContentsMargins(0, 0, 0, 0)
-        title_box.setSpacing(1)
-        title = QLabel("期刊库")
-        title.setObjectName("paperPageTitle")
-        subtitle = QLabel("自动收录投稿期刊，沉淀自己的选刊经验")
-        subtitle.setObjectName("dateLabel")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-        self.choose_button = QPushButton("选刊")
-        self.choose_button.setObjectName("subtleButton")
-        self.choose_button.setToolTip("根据论文关键词、优先级和个人经验选刊")
-        self.choose_button.clicked.connect(self._choose_for_paper)
-        tools_menu = QMenu(self)
-        tools_menu.setObjectName("journalToolsMenu")
-        catalog_action = tools_menu.addAction("补充土地科学期刊")
-        catalog_action.triggered.connect(self._add_land_science_catalog)
-        update_changed_action = tools_menu.addAction("全部更新缺少/变化期刊")
-        update_changed_action.triggered.connect(self._update_changed_journals)
-        metadata_action = tools_menu.addAction("联网补全期刊信息")
-        metadata_action.triggered.connect(lambda: self._enrich_metadata())
-        incomplete_action = tools_menu.addAction("补全资料不完整的期刊")
-        incomplete_action.triggered.connect(self._enrich_incomplete_metadata)
-        publisher_check_action = tools_menu.addAction("模糊校验出版社（Crossref）")
-        publisher_check_action.triggered.connect(self._validate_publishers)
-        tools_menu.addSeparator()
-        jcr_action = tools_menu.addAction("核验当前 JCR 分区（Clarivate）")
-        jcr_action.triggered.connect(self._verify_jcr)
-        easyscholar_action = tools_menu.addAction("更新期刊指标（EasyScholar）")
-        easyscholar_action.triggered.connect(self._update_easyscholar)
-        ai_action = tools_menu.addAction("DeepSeek 补全资料与 AI JCR 估计")
-        ai_action.triggered.connect(self._enrich_with_ai)
-        self.tools_button = QPushButton("工具")
-        self.tools_button.setObjectName("subtleButton")
-        self.tools_button.setMenu(tools_menu)
-        self.add_button = QPushButton("+")
-        self.add_button.setObjectName("primaryButton")
-        self.add_button.setToolTip("添加期刊")
+        header = PageHeader("期刊库", accent="journals")
+        self.heading_widget = header
+        self.heading_layout = header.layout_row
+        self.title_box_widget = header.title_label
+        self.choose_button = header.add_primary_action(
+            "选刊",
+            self._choose_for_paper,
+            tooltip="根据论文关键词、优先级和个人经验选刊",
+        )
+        self.add_button = QPushButton("新增")
+        self.add_button.setObjectName("subtleButton")
+        self.add_button.setToolTip("新增期刊")
         self.add_button.clicked.connect(self._add_journal)
-        root.addWidget(self.heading_widget)
+        header.layout_row.addWidget(self.add_button)
+        self.tools_button = header.add_overflow_menu("期刊库更多操作")
+        self.tools_button.add_action("核验当前 JCR 分区（Clarivate）", self._verify_jcr)
+        self.tools_button.add_action("更新期刊指标（EasyScholar）", self._update_easyscholar)
+        self.tools_button.add_action("DeepSeek 补全资料与 AI JCR 估计", self._enrich_with_ai)
+        root.addWidget(header)
 
-        self.toolbar_widget = QWidget()
-        self.toolbar_layout = QGridLayout(self.toolbar_widget)
-        self.toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        self.toolbar_layout.setHorizontalSpacing(8)
-        self.toolbar_layout.setVerticalSpacing(5)
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("搜索期刊、出版社、研究方向或个人经验")
-        self.search_edit.textChanged.connect(self._render)
-        self.filter_combo = QComboBox()
-        self.filter_combo.addItems(
+        filters = FilterBar("搜索期刊、出版社、研究方向或个人经验")
+        self.toolbar_widget = filters
+        self.toolbar_layout = filters.row
+        self.search_edit = filters.search_edit
+        # Rebuilding a shelf creates a sizeable QWidget tree.  Wait until the
+        # user pauses instead of rebuilding all rows for every keystroke.
+        self.search_edit.textChanged.connect(self._schedule_render)
+        self.filter_combo = filters.add_filter(
             ["全部", "已收藏", "已有投稿记录", "待补资料", "JCR 已核验", "JCR 待核验", "JCR Q1", "JCR Q2", "JCR Q3", "JCR Q4"]
         )
         self.filter_combo.currentTextChanged.connect(self._render)
-        self.group_combo = QComboBox()
-        self.group_combo.addItems(["按出版社", "按标签", "全部期刊"])
+        self.group_combo = filters.add_filter(["按出版社", "按标签", "全部期刊"])
         self.group_combo.currentTextChanged.connect(self._render)
-        root.addWidget(self.toolbar_widget)
-        self.count_label = QLabel()
-        self.count_label.setObjectName("sectionLabel")
-        root.addWidget(self.count_label)
+        self.count_label = filters.count_label
+        root.addWidget(filters)
         self.health_label = QLabel()
         self.health_label.setObjectName("dateLabel")
         self.health_label.setWordWrap(True)
@@ -1256,59 +892,38 @@ class JournalLibraryPage(QWidget):
         self._adapt_compact_layout(force=True)
 
     def _adapt_compact_layout(self, *, force: bool = False) -> None:
-        """Keep the library usable in the small widget without horizontal drift."""
-        compact = self.width() <= 660
-        if not force and compact == self._library_compact:
-            return
-        self._library_compact = compact
-        for widget in (self.title_box_widget, self.choose_button, self.tools_button, self.add_button):
-            self.heading_layout.removeWidget(widget)
-        for widget in (self.search_edit, self.filter_combo, self.group_combo):
-            self.toolbar_layout.removeWidget(widget)
-        if compact:
-            self.heading_layout.addWidget(self.title_box_widget, 0, 0, 1, 3)
-            self.heading_layout.addWidget(self.choose_button, 1, 0)
-            self.heading_layout.addWidget(self.tools_button, 1, 1)
-            self.heading_layout.addWidget(self.add_button, 1, 2)
-            self.heading_layout.setColumnStretch(0, 1)
-            self.heading_layout.setColumnStretch(1, 0)
-            self.heading_layout.setColumnStretch(2, 0)
-            self.toolbar_layout.addWidget(self.search_edit, 0, 0, 1, 2)
-            self.toolbar_layout.addWidget(self.filter_combo, 1, 0)
-            self.toolbar_layout.addWidget(self.group_combo, 1, 1)
-            self.toolbar_layout.setColumnStretch(0, 1)
-            self.toolbar_layout.setColumnStretch(1, 1)
-        else:
-            self.heading_layout.addWidget(self.title_box_widget, 0, 0)
-            self.heading_layout.addWidget(self.choose_button, 0, 1, alignment=Qt.AlignmentFlag.AlignBottom)
-            self.heading_layout.addWidget(self.tools_button, 0, 2, alignment=Qt.AlignmentFlag.AlignBottom)
-            self.heading_layout.addWidget(self.add_button, 0, 3, alignment=Qt.AlignmentFlag.AlignBottom)
-            self.heading_layout.setColumnStretch(0, 1)
-            self.heading_layout.setColumnStretch(1, 0)
-            self.heading_layout.setColumnStretch(2, 0)
-            self.heading_layout.setColumnStretch(3, 0)
-            self.toolbar_layout.addWidget(self.search_edit, 0, 0)
-            self.toolbar_layout.addWidget(self.filter_combo, 0, 1)
-            self.toolbar_layout.addWidget(self.group_combo, 0, 2)
-            self.toolbar_layout.setColumnStretch(0, 1)
-            self.toolbar_layout.setColumnStretch(1, 0)
-            self.toolbar_layout.setColumnStretch(2, 0)
-        self.heading_widget.updateGeometry()
-        self.toolbar_widget.updateGeometry()
+        """The shared one-row page kit scales naturally; keep this hook for callers."""
+        del force
+        self._library_compact = self.width() <= 660
+
+    def _show_data_tools_hint(self) -> None:
+        """MainWindow replaces this with the unified settings-center bridge."""
+        self.settings_center_requested.emit("journal_tools")
 
     def reload(self) -> None:
-        sync_journal_library_from_papers(load_papers())
+        papers = load_papers()
+        sync_journal_library_from_papers(papers)
         self.journals = load_journal_library()
-        self.usage = journal_usage_index(load_papers())
+        self.usage = journal_usage_index(papers)
+        self._usage_by_name = {}
+        for key, value in self.usage.items():
+            name = str(key).split("|", 1)[0]
+            if name and name not in self._usage_by_name:
+                self._usage_by_name[name] = value
         self._render()
+
+    def _schedule_render(self, *_args) -> None:
+        """Coalesce rapid search edits into one shelf rebuild."""
+
+        self._search_render_timer.start()
 
     def _usage_for(self, journal: dict) -> dict:
         exact = self.usage.get(_journal_key(str(journal.get("name", "")), str(journal.get("publisher", ""))))
         if exact is not None:
             return exact
         name = str(journal.get("name", "")).strip().casefold()
-        return next(
-            (value for key, value in self.usage.items() if key.split("|", 1)[0] == name),
+        return self._usage_by_name.get(
+            name,
             {"submission_count": 0, "paper_titles": [], "last_used_at": ""},
         )
 
@@ -1355,6 +970,7 @@ class JournalLibraryPage(QWidget):
         return result
 
     def _render(self) -> None:
+        self._search_render_timer.stop()
         while self.rows.count() > 1:
             child = self.rows.takeAt(0)
             widget = child.widget()
@@ -1607,7 +1223,7 @@ class JournalLibraryPage(QWidget):
         if self._easy_worker is not None and self._easy_worker.isRunning():
             return
         if not is_easyscholar_ready():
-            self._show_notice("请先在“设置 → AI 与期刊数据”填写并启用 EasyScholar 密钥。")
+            self._show_notice(str(easyscholar_readiness().get("message", "请先配置 EasyScholar 密钥。")))
             return
         if not self.journals:
             self._show_notice("期刊库为空，请先添加期刊。")
@@ -1981,7 +1597,10 @@ class JournalLibraryPage(QWidget):
 
     def _save(self) -> None:
         save_journal_library(self.journals)
-        self.reload()
+        # The in-memory list is already authoritative.  Reading it back and
+        # synchronising papers here used to rebuild the complete shelf twice
+        # and then synchronously refresh several unrelated pages.
+        self._render()
         self.changed.emit()
 
     def _reorder_journals(self, ordered_ids: list[str]) -> None:

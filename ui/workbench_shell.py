@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.motion import animate_widget_enter
+
 
 @dataclass(frozen=True)
 class RouteTarget:
@@ -157,6 +159,7 @@ class WorkbenchShell(QWidget):
             chip.setObjectName("workbenchChip")
             chip.setCheckable(True)
             chip.setProperty("workbench_anchor", anchor)
+            chip.setProperty("accent", anchor)
             chip.clicked.connect(lambda _checked=False, value=anchor: self.navigate(workbench, value))
             chip_layout.addWidget(chip)
         chip_layout.addStretch(1)
@@ -174,10 +177,13 @@ class WorkbenchShell(QWidget):
             if target.workbench in self._inner_stacks:
                 inner, anchors = self._inner_stacks[target.workbench]
                 inner.setCurrentIndex(anchors.get(target.anchor, 0))
+                animate_widget_enter(inner.currentWidget(), distance=3, duration_ms=150)
                 panel = self._primary_stack.widget(primary_index)
                 for button in panel.findChildren(QPushButton):
                     value = str(button.property("workbench_anchor") or "")
                     if value:
                         button.setChecked(value == target.anchor)
+            else:
+                animate_widget_enter(self._primary_stack.currentWidget(), distance=3, duration_ms=150)
         self.route_changed.emit(target.workbench, target.anchor)
         return target

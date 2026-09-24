@@ -16,7 +16,9 @@ import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from utils.api_rate_limit import rate_limited_urlopen as urlopen
 
 from utils.file_manager import load_app_settings
 from utils.secure_store import SecretStoreError, reveal_secret
@@ -48,9 +50,63 @@ def get_easyscholar_settings() -> dict[str, Any]:
     }
 
 
+def easyscholar_readiness(
+    settings: dict[str, Any] | None = None,
+    *,
+    revealer: Callable[[str], str] | None = None,
+) -> dict[str, Any]:
+    """Return a truthful local readiness state without contacting the API.
+
+    A saved DPAPI blob is not proof that the current Windows account can still
+    decrypt it.  This happens after a settings restore or a Windows-account
+    change, and previously made the UI report a misleading "configured" state.
+    """
+
+    config = get_easyscholar_settings() if settings is None else settings
+    config = config if isinstance(config, dict) else {}
+    enabled = bool(config.get("enabled", False))
+    token = str(config.get("secret_key_secret", "")).strip()
+    if not enabled:
+        return {
+            "ready": False,
+            "state": "disabled",
+            "needs_reentry": False,
+            "message": "EasyScholar 尚未启用；请在“设置 → AI 与期刊数据”启用并填写密钥。",
+        }
+    if not token:
+        return {
+            "ready": False,
+            "state": "missing",
+            "needs_reentry": True,
+            "message": "请在“设置 → AI 与期刊数据”填写 EasyScholar 密钥。",
+        }
+    reveal = revealer or reveal_secret
+    try:
+        secret = str(reveal(token) or "").strip()
+    except SecretStoreError:
+        return {
+            "ready": False,
+            "state": "unreadable",
+            "needs_reentry": True,
+            "message": "当前保存的 EasyScholar 密钥无法解密，请在“设置 → AI 与期刊数据”重新填写。",
+        }
+    if not secret:
+        return {
+            "ready": False,
+            "state": "empty",
+            "needs_reentry": True,
+            "message": "当前保存的 EasyScholar 密钥为空，请重新填写。",
+        }
+    return {
+        "ready": True,
+        "state": "ready",
+        "needs_reentry": False,
+        "message": "EasyScholar 密钥可读取。",
+    }
+
+
 def is_easyscholar_ready() -> bool:
-    config = get_easyscholar_settings()
-    return bool(config["enabled"] and config["secret_key_secret"])
+    return bool(easyscholar_readiness().get("ready"))
 
 
 def _require_secret() -> tuple[dict[str, Any], str]:
@@ -62,7 +118,9 @@ def _require_secret() -> tuple[dict[str, Any], str]:
     try:
         secret = reveal_secret(config["secret_key_secret"])
     except SecretStoreError as error:
-        raise EasyScholarConfigurationError(str(error)) from error
+        raise EasyScholarConfigurationError(
+            "当前保存的 EasyScholar 密钥无法解密，请在“设置 → AI 与期刊数据”重新填写。"
+        ) from error
     if not secret:
         raise EasyScholarConfigurationError("请先在设置中填写 EasyScholar 开放接口密钥。")
     return config, secret

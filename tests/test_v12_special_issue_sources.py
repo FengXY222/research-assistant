@@ -6,12 +6,16 @@ from datetime import datetime
 
 from utils.special_issue_sources import (
     AggregatorDiscoverySource,
+    GeoDeadlinesSource,
+    JournalCfpDdlSource,
     ElsevierCallsSource,
     FrontiersResearchTopicsSource,
     MdpiSpecialIssuesSource,
+    ResearchCollectionRadarSource,
     SpringerCollectionsSource,
     TaylorFrancisCallsSource,
     WileyCallsSource,
+    default_special_issue_sources,
 )
 
 
@@ -28,6 +32,14 @@ HTML_FIXTURE = """
 """
 
 
+def test_production_sources_disable_elsevier_official_and_keep_third_party_discovery() -> None:
+    sources = default_special_issue_sources()
+    assert not any(isinstance(source, ElsevierCallsSource) for source in sources)
+    assert any(isinstance(source, GeoDeadlinesSource) for source in sources)
+    assert any(isinstance(source, ResearchCollectionRadarSource) for source in sources)
+    assert any(isinstance(source, JournalCfpDdlSource) for source in sources)
+
+
 def test_all_official_source_adapters_emit_normalizable_records_from_structured_data() -> None:
     since = datetime(2026, 8, 30)
     for source_type in (
@@ -37,7 +49,14 @@ def test_all_official_source_adapters_emit_normalizable_records_from_structured_
         WileyCallsSource,
         MdpiSpecialIssuesSource,
     ):
-        source = source_type(fetcher=lambda _url: HTML_FIXTURE)
+        source = (
+            source_type(
+                fetcher=lambda _url: HTML_FIXTURE,
+                urls=["https://onlinelibrary.wiley.com/page/journal/12345678/homepage/call_for_papers.html"],
+            )
+            if source_type is WileyCallsSource
+            else source_type(fetcher=lambda _url: HTML_FIXTURE)
+        )
         rows = source.fetch(since=since)
         assert len(rows) == 1, source_type.__name__
         assert rows[0]["title"] == "Soil Carbon Mapping Collection"
@@ -212,7 +231,7 @@ def test_taylor_francis_drops_weak_single_token_matches() -> None:
     assert [row["title"] for row in rows] == ["Soil Carbon Mapping for Sustainable Land Management"]
 
 
-def test_elsevier_blocked_source_reports_failure_without_reader_fallback() -> None:
+def test_elsevier_blocked_source_uses_reader_fallback() -> None:
     reader = """
     Title: Browse Calls for Papers | ScienceDirect.com
     URL Source: http://www.sciencedirect.com/browse/calls-for-papers
@@ -236,9 +255,117 @@ def test_elsevier_blocked_source_reports_failure_without_reader_fallback() -> No
     source = ElsevierCallsSource(fetcher=fetch)
     rows = source.fetch(since=datetime(2026, 8, 30), keywords=["soil carbon"])
 
-    assert rows == []
-    assert rows.status == "failed"
+    assert [row["title"] for row in rows] == ["Digital soil mapping and soil organic carbon monitoring"]
+    assert rows.status == "partial"
+    assert rows[0]["publisher"] == "Elsevier"
+    assert rows[0]["discovery_url"] == ElsevierCallsSource.reader_url
     assert "blocked direct access" in rows.errors[0]["error"]
+
+
+def test_wiley_discovers_relevant_journal_then_uses_current_official_call_path() -> None:
+    requested: list[str] = []
+
+    def fetch(url: str) -> str:
+        requested.append(url)
+        if "/works?" in url:
+            return '{"group_by":[{"key":"https://openalex.org/S123","key_display_name":"Soil Research","count":12}]}'
+        if "/sources?" in url:
+            return '{"results":[{"id":"https://openalex.org/S123","display_name":"Soil Research","type":"journal","host_organization_name":"Wiley","homepage_url":"https://onlinelibrary.wiley.com/journal/12345678","issn_l":"1234-5678"}]}'
+        if "/page/journal/12345678/homepage/call_for_papers.html" in url:
+            return HTML_FIXTURE
+        raise AssertionError(url)
+
+    rows = WileyCallsSource(fetcher=fetch).fetch(
+        since=datetime(2026, 8, 30), keywords=["soil carbon"]
+    )
+
+    assert len(rows) == 1
+    assert any("/page/journal/12345678/homepage/call_for_papers.html" in url for url in requested)
+    assert rows[0]["publisher"] == "Wiley"
+
+
+def test_wiley_discovery_caps_openalex_candidates_and_journal_batch() -> None:
+    requested: list[str] = []
+    groups = [
+        {"key": f"https://openalex.org/S{index}", "key_display_name": f"Journal {index}", "count": 100-index}
+        for index in range(60)
+    ]
+
+    def fetch(url: str) -> str:
+        import json
+        from urllib.parse import parse_qs, urlsplit
+
+        requested.append(url)
+        if "/works?" in url:
+            return json.dumps({"group_by": groups})
+        if "/sources?" in url:
+            selected = parse_qs(urlsplit(url).query)["filter"][0].split(":", 1)[1].split("|")
+            assert len(selected) == WileyCallsSource.journal_candidate_limit
+            return json.dumps(
+                {
+                    "results": [
+                        {
+                            "id": f"https://openalex.org/{source_id}",
+                            "display_name": source_id,
+                            "type": "journal",
+                            "host_organization_name": "Wiley",
+                            "homepage_url": f"https://onlinelibrary.wiley.com/journal/{source_id[1:].zfill(8)}",
+                        }
+                        for source_id in selected
+                    ]
+                }
+            )
+        raise AssertionError(url)
+
+    journals = WileyCallsSource(fetcher=fetch)._openalex_journals(["soil carbon"])
+
+    assert len(journals) == WileyCallsSource.journal_batch_limit
+    assert sum("/sources?" in url for url in requested) == 1
+
+
+def test_wiley_stops_after_two_journals_with_all_routes_unavailable() -> None:
+    requested: list[str] = []
+
+    def fetch(url: str) -> str:
+        import json
+
+        requested.append(url)
+        if "/works?" in url:
+            return json.dumps(
+                {
+                    "group_by": [
+                        {"key": f"https://openalex.org/S{index}", "key_display_name": f"Journal {index}", "count": 20-index}
+                        for index in range(1, 6)
+                    ]
+                }
+            )
+        if "/sources?" in url:
+            return json.dumps(
+                {
+                    "results": [
+                        {
+                            "id": f"https://openalex.org/S{index}",
+                            "display_name": f"Journal {index}",
+                            "type": "journal",
+                            "host_organization_name": "Wiley",
+                            "homepage_url": f"https://onlinelibrary.wiley.com/journal/{index:08d}",
+                        }
+                        for index in range(1, 6)
+                    ]
+                }
+            )
+        raise OSError("publisher route unavailable")
+
+    result = WileyCallsSource(fetcher=fetch).fetch(
+        since=datetime(2026, 8, 30), keywords=["soil carbon"]
+    )
+
+    publisher_requests = [url for url in requested if "onlinelibrary.wiley.com" in url]
+    assert result == []
+    assert len(publisher_requests) == (
+        WileyCallsSource.consecutive_failure_limit * WileyCallsSource.route_limit * 2
+    )
+    assert any(error["stage"] == "circuit_breaker" for error in result.errors)
 
 
 def test_elsevier_official_discovery_keeps_only_keyword_relevant_current_calls() -> None:

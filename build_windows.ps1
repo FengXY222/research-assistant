@@ -4,19 +4,43 @@ param(
 
 $ErrorActionPreference = "Stop"
 $appName = ([char]0x79d1).ToString() + [char]0x7814 + [char]0x52a9 + [char]0x624b
-$appVersion = "12.2.1"
+$appVersion = "13.1.2"
 $issFile = Join-Path $PSScriptRoot ($appName + ".iss")
-$basePythonPath = "S:\Python\Scripts\python.exe"
 $buildEnvironment = Join-Path $PSScriptRoot ".build-venv"
 $pythonPath = Join-Path $buildEnvironment "Scripts\python.exe"
 $bundledFontData = "assets\fonts\NotoSansCJKsc-Regular.otf;assets\fonts"
+$bundledIconData = "assets\icons\lucide;assets\icons\lucide"
 $bundledTranslationData = "assets\translation\opus-mt-en-zh;assets\translation\opus-mt-en-zh"
-if (-not (Test-Path -LiteralPath $basePythonPath)) {
-    throw "未找到指定 Python 环境：$basePythonPath"
+$buildPythonReady = $false
+if (Test-Path -LiteralPath $pythonPath -PathType Leaf) {
+    & $pythonPath -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+    $buildPythonReady = ($LASTEXITCODE -eq 0)
 }
-if (-not (Test-Path -LiteralPath $pythonPath)) {
-    & $basePythonPath -m venv $buildEnvironment
-    if ($LASTEXITCODE -ne 0) { throw "创建隔离打包环境失败，已停止打包。" }
+if (-not $buildPythonReady) {
+    $basePythonPath = $null
+    foreach ($candidate in @(
+        (Join-Path $PSScriptRoot ".venv\Scripts\python.exe"),
+        "S:\Python\Scripts\python.exe"
+    )) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $basePythonPath = $candidate
+            break
+        }
+    }
+    if (-not $basePythonPath) {
+        $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+        if ($pythonCommand) { $basePythonPath = $pythonCommand.Source }
+    }
+    if (-not $basePythonPath) {
+        throw "未找到可用于创建打包环境的 Python。请先安装 Python 或创建项目 .venv。"
+    }
+    $venvArguments = @("-m", "venv")
+    if (Test-Path -LiteralPath $buildEnvironment -PathType Container) {
+        $venvArguments += "--upgrade"
+    }
+    $venvArguments += $buildEnvironment
+    & $basePythonPath @venvArguments
+    if ($LASTEXITCODE -ne 0) { throw "创建或修复隔离打包环境失败，已停止打包。" }
 }
 
 & $pythonPath -m pip install -r (Join-Path $PSScriptRoot "requirements.txt")
@@ -62,6 +86,7 @@ try {
     }
     $pyInstallerArguments += @(
         "--add-data", $bundledFontData,
+        "--add-data", $bundledIconData,
         "--add-data", $bundledTranslationData,
         "--version-file", "version_info.txt",
         "--name", $appName

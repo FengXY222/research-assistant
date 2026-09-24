@@ -336,6 +336,24 @@ def match_special_issue(
     """Validate AI evidence, then qualify content independently of publisher rank."""
     threshold = max(FORMAL_MINIMUM_SCORE, min(100, int(minimum_score)))
     paragraphs = scope_paragraphs(item)
+    scope_complete = has_complete_scope(item)
+    assessment_item = deepcopy(item)
+    evidence_mode = "full_scope" if scope_complete else "metadata_inference"
+    if not paragraphs:
+        metadata_parts = [
+            f"Title: {str(item.get('title', '')).strip()}",
+            f"Journal: {str(item.get('journal', '')).strip()}",
+            f"Publisher: {str(item.get('publisher', '')).strip()}",
+            "Keywords: " + "; ".join(str(value).strip() for value in item.get("keywords", []) if str(value).strip())
+            if isinstance(item.get("keywords"), list)
+            else "",
+            f"Available description: {str(item.get('scope_text', '')).strip()}",
+        ]
+        inferred = " | ".join(value for value in metadata_parts if value and not value.endswith(": "))
+        if inferred:
+            paragraphs = [{"id": "metadata-inference-0001", "text": "Metadata-only thematic evidence; full call scope is unavailable. " + inferred}]
+            assessment_item["scope_text"] = paragraphs[0]["text"]
+            assessment_item["scope_paragraphs"] = deepcopy(paragraphs)
     model = ""
     known_papers = profiles.get("papers", {})
     known_papers = known_papers if isinstance(known_papers, dict) else {}
@@ -351,15 +369,16 @@ def match_special_issue(
         "profile_fingerprint": _fingerprint(_semantic(profiles)), "scope_fingerprint": _fingerprint(paragraphs),
         "cache_fingerprint": match_input_fingerprint(item, profiles, model),
         "publisher_unknown": publisher_is_unknown(item.get("publisher")), "publisher_multiplier": apply_publisher_priority(0, item.get("publisher"))[1],
-        "validation_errors": [],
+        "validation_errors": [], "assessment_basis": evidence_mode,
+        "scope_complete": scope_complete,
     }
-    if not has_complete_scope(item):
-        return {**base, "status": "awaiting_scope", "reason": "尚未取得完整征稿范围，暂不进行匹配评分。"}
+    if not paragraphs:
+        return {**base, "status": "awaiting_metadata", "reason": "缺少可用于主题推断的标题、关键词和征稿说明。"}
     if ai_matcher is None:
         from utils.ai_service import score_special_issue_with_ai
         ai_matcher = score_special_issue_with_ai
     try:
-        raw = ai_matcher({**deepcopy(item), "scope_paragraphs": deepcopy(paragraphs)}, deepcopy(profiles), progress)
+        raw = ai_matcher({**assessment_item, "scope_paragraphs": deepcopy(paragraphs), "assessment_basis": evidence_mode}, deepcopy(profiles), progress)
     except Exception as error:
         return {**base, "status": "ai_unavailable", "reason": "AI 匹配暂不可用，等待重新评估。", "error_type": type(error).__name__}
     try:
@@ -368,6 +387,9 @@ def match_special_issue(
         return {**base, "status": "invalid_response", "reason": "AI 匹配结果缺少有效证据，等待重新评估。", "validation_errors": [str(error)]}
     model = str(raw.get("model", "")).strip()
     result = {**base, **validated, "model": model, "cache_fingerprint": match_input_fingerprint(item, profiles, model)}
+    result["assessment_basis"] = evidence_mode
+    result["scope_complete"] = scope_complete
+    result["ai_axis_payload"] = deepcopy(raw.get("ai_axis_payload", {})) if isinstance(raw.get("ai_axis_payload"), dict) else {}
     result["rank_score"], result["publisher_multiplier"] = apply_publisher_priority(result["score"], item.get("publisher"))
     for paper in result["paper_matches"]:
         paper["rank_score"] = None if paper["score"] is None else apply_publisher_priority(paper["score"], item.get("publisher"))[0]

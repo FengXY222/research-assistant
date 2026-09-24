@@ -49,7 +49,7 @@ class JournalSelectionDialogV111Tests(TestCase):
         self.assertEqual(self.dialog.speed_priority.currentData(), "standard")
         self.assertTrue(self.dialog.oa_mode.isHidden())
         self.assertTrue(self.dialog.quartile_target.isHidden())
-        self.assertEqual(self.dialog.ai_button.text(), "开始 AI 选刊")
+        self.assertEqual(self.dialog.ai_button.text(), "开始选刊")
         self.assertEqual(self.dialog.candidate_list.count(), 0)
 
     def test_external_ai_candidate_exposes_a_fast_import_action(self) -> None:

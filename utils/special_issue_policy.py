@@ -119,6 +119,105 @@ def evaluate_special_issue(
     view: str = 'recommended', filters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = now or datetime.now()
+    if str(item.get('scoring_version', '')).startswith('special-issue-dual-axis-13'):
+        relevance = item.get('relevance_axis') if isinstance(item.get('relevance_axis'), dict) else {}
+        opportunity = item.get('opportunity_axis') if isinstance(item.get('opportunity_axis'), dict) else {}
+        relevance_score = int(relevance.get('total', item.get('relevance_score', 0)) or 0)
+        opportunity_score = int(opportunity.get('total', item.get('opportunity_score', 0)) or 0)
+        score = int(round((relevance_score + opportunity_score) / 2))
+        valid_axes = bool(
+            relevance.get('valid') and opportunity.get('valid')
+            and relevance_score > 0 and opportunity_score > 0
+        )
+        state = str(item.get('candidate_state', 'retained_unshown'))
+        call_state = str(item.get('call_status', item.get('verification_status', ''))).casefold()
+        remaining = days_remaining(item, now)
+        rolling = bool(item.get('rolling')) or str(item.get('deadline', '')).strip().casefold() == 'rolling'
+        conflict = bool(item.get('fact_conflicts')) or str(item.get('identity_status', '')).casefold() == 'conflict'
+        open_ok = bool(
+            not conflict
+            and call_state not in {'closed', 'expired'}
+            and (rolling or (remaining is not None and remaining >= 0))
+        )
+        content_ok = bool(state == 'visible' and valid_axes and relevance_score >= CONTENT_THRESHOLD)
+        recommended = content_ok and open_ok and not is_ignored(item)
+        if conflict:
+            reason_code = 'identity_or_fact_conflict'
+        elif call_state in {'closed', 'expired'} or (remaining is not None and remaining < 0):
+            reason_code = 'closed'
+        elif not valid_axes:
+            reason_code = 'invalid_dual_axis_score'
+        elif state != 'visible':
+            reason_code = str(item.get('display_reason', 'retained_unshown'))
+        elif str(item.get('verification_label', '')) == '官网暂未核验':
+            reason_code = 'aggregator_unverified'
+        else:
+            reason_code = 'eligible'
+        if view == 'saved':
+            visible = is_saved(item) and not is_ignored(item)
+        elif view == 'ignored':
+            visible = is_ignored(item)
+        elif view == 'changed':
+            visible = not is_ignored(item) and bool(item.get('deadline_history') or item.get('verification_history'))
+        elif view == 'unverified':
+            visible = not is_ignored(item) and state != 'visible'
+        elif view == 'all':
+            visible = not is_ignored(item) and state == 'visible'
+        else:
+            visible = recommended and not is_saved(item)
+
+        filters = filters or {}
+        publisher = canonical_publisher(item.get('publisher', ''))
+        fee = str(item.get('fee_mode', 'unknown')).casefold()
+        actual = {'publisher': publisher, 'fee': fee, 'jcr': quartile(item, 'jcr'), 'cas': quartile(item, 'cas')}
+        unknowns = {name for name, value in actual.items() if not known(value)}
+        mismatch = False
+        for name, wanted in filters.items():
+            if wanted in (None, '', 'any'):
+                continue
+            if name in actual:
+                if name in unknowns:
+                    continue
+                if name == 'fee':
+                    options = {'no_fee': {'subscription', 'hybrid', 'no_fee'}, 'paid': {'apc', 'hybrid', 'paid', 'gold', 'open_access'}}
+                    mismatch |= actual[name] not in options.get(str(wanted), {str(wanted)})
+                elif name == 'publisher':
+                    mismatch |= str(actual[name]).casefold() != canonical_publisher(wanted).casefold()
+                else:
+                    wanted_values = wanted if isinstance(wanted, (list, tuple, set)) else [wanted]
+                    mismatch |= actual[name] not in {str(value).upper().removeprefix('Q').removesuffix('区') for value in wanted_values}
+            elif name == 'search':
+                haystack = ' '.join(str(item.get(key, '')) for key in ('title', 'journal', 'publisher', 'scope_text')).casefold()
+                mismatch |= ' '.join(str(wanted).casefold().split()) not in haystack
+        wanted_days = filters.get('deadline')
+        if wanted_days not in (None, '', 'any'):
+            if remaining is None and not rolling:
+                unknowns.add('deadline')
+            elif remaining is not None:
+                mismatch |= remaining < 0 or remaining > int(wanted_days)
+
+        publisher_name = canonical_publisher(item.get('publisher', ''))
+        third_party = bool(item.get('is_aggregator')) or any(
+            bool(value.get('is_aggregator'))
+            for value in item.get('source_evidence', [])
+            if isinstance(value, dict)
+        )
+        elsevier_third_party = third_party and publisher_name == 'Elsevier'
+        priority = publisher_name in {'Elsevier', 'Springer Nature', 'Taylor & Francis', 'Wiley'}
+        tier = {'A': 0, 'B': 1, 'C': 2}.get(str(item.get('pyramid_level', '')), 3)
+        reasons = [
+            *[str(value) for value in relevance.get('reasons', []) if str(value).strip()],
+            *[str(value) for value in opportunity.get('reasons', []) if str(value).strip()],
+        ]
+        return {
+            'visible': bool(visible and not mismatch), 'recommended': bool(recommended),
+            'content_qualified': content_ok, 'open': open_ok, 'reason_code': reason_code,
+            'score': score, 'rank_score': float(score), 'reason': '；'.join(reasons[:3]),
+            'match': match_for_view(item, paper_id), 'unknown_count': len(unknowns),
+            'unknown_fields': sorted(unknowns), 'days_remaining': remaining,
+            'sort_key': (tier, 0 if elsevier_third_party else 1 if priority else 2, len(unknowns), -relevance_score, -opportunity_score,
+                         remaining if remaining is not None else 999999, str(item.get('title', '')).casefold()),
+        }
     match = match_for_view(item, paper_id)
     try:
         score = max(0, min(100, int(match.get('score', 0) or 0)))

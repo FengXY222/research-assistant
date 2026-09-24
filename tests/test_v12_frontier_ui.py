@@ -81,7 +81,9 @@ def _fixture_items() -> list[dict]:
     return rows
 
 
-def test_page_has_journal_and_preprint_tabs_and_withholds_pending_quality() -> None:
+def test_v12_stream_tabs_removed_and_legacy_cache_renders_read_only() -> None:
+    """v13.1：双流标签删除；v12 旧缓存按原可见性规则只读合流展示。"""
+
     page = DailyFrontierPage()
     page.data = {
         "profile": {"daily_limit": 5},
@@ -92,34 +94,30 @@ def test_page_has_journal_and_preprint_tabs_and_withholds_pending_quality() -> N
     page._render()
     host = _show(page)
 
-    journal_tab = page.findChild(QPushButton, "frontierJournalTab")
-    preprint_tab = page.findChild(QPushButton, "frontierPreprintTab")
+    assert page.findChild(QPushButton, "frontierJournalTab") is None
+    assert page.findChild(QPushButton, "frontierPreprintTab") is None
+    assert not hasattr(page, "_stream_mode")
     pending = page.findChild(QPushButton, "frontierPendingQualityButton")
     titles = [label.text() for label in page.content.findChildren(QLabel, "frontierTitle")]
 
-    assert journal_tab is not None and journal_tab.isChecked()
-    assert preprint_tab is not None
-    assert pending is not None and "1" in pending.text()
+    assert pending is None
+    assert page.filter_combo.findText("待内容复核") == -1
+    assert page.filter_combo.findText("分区待核验") == -1
+    assert page.filter_combo.findText("已排除候选") == -1
+    # 期刊论文与预印本合流为单一列表；旧隐藏池（质量 withheld）不展示。
     assert any("soil organic carbon" in title for title in titles)
+    assert any("geospatial preprint" in title for title in titles)
     assert all("Unknown quality" not in title for title in titles)
-    assert all("preprint" not in title.casefold() for title in titles)
     host.close()
 
 
-def test_preprint_tab_switches_to_a_separate_stream() -> None:
-    page = DailyFrontierPage()
-    page.data = {"profile": {"daily_limit": 5}, "items": _fixture_items(), "algorithm_version": 12}
-    page._render()
-    host = _show(page)
+def test_preprint_card_badges_render_without_journal_quartile() -> None:
+    card = FrontierCard(_fixture_items()[2])
+    host = _show(card, 480, 300)
 
-    page.frontier_preprint_tab.click()
-    _app().processEvents()
-    titles = [label.text() for label in page.content.findChildren(QLabel, "frontierTitle")]
-
-    assert titles == ["A geospatial preprint"]
-    assert page.content.findChild(QLabel, "frontierPreprintBadge") is not None
-    assert page.content.findChild(QLabel, "frontierJcrUnknown") is None
-    assert page.content.findChild(QLabel, "frontierCasBadge") is None
+    assert card.findChild(QLabel, "frontierPreprintBadge") is not None
+    assert card.findChild(QLabel, "frontierJcrUnknown") is None
+    assert card.findChild(QLabel, "frontierCasBadge") is None
     host.close()
 
 
@@ -136,10 +134,13 @@ def test_long_title_does_not_overlap_the_stable_action_strip_at_400_pixels() -> 
     host.close()
 
 
-def test_widget_card_keeps_score_jcr_and_cas_readable_at_480_pixels() -> None:
+def test_widget_card_prioritizes_one_score_summary_and_hides_diagnostics_until_requested() -> None:
     card = FrontierCard(_fixture_items()[0])
     host = _show(card, 480, 300)
 
+    summary = card.findChild(QLabel, "frontierScoreSummary")
+    assert summary is not None and summary.isVisible()
+    assert summary.text() == "综合 91 · 内容 94"
     for object_name, expected in (
         ("frontierScore", "综合 91"),
         ("frontierContentScore", "内容 94"),
@@ -148,9 +149,11 @@ def test_widget_card_keeps_score_jcr_and_cas_readable_at_480_pixels() -> None:
         ("frontierCasBadge", "中科院 2区"),
     ):
         label = card.findChild(QLabel, object_name)
-        assert label is not None and label.isVisible()
+        assert label is not None and not label.isVisible()
         assert label.text() == expected
-        assert label.contentsRect().width() >= label.fontMetrics().horizontalAdvance(expected)
+    card.details_toggle.toggle()
+    _app().processEvents()
+    assert card.findChild(QLabel, "frontierJcrVerified").isVisible()
     host.close()
 
 

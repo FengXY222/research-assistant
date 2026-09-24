@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from utils.evidence_cache import EvidenceCache
@@ -117,6 +118,40 @@ def test_discovery_marks_arxiv_as_preprint(tmp_path: Path, monkeypatch) -> None:
 
     assert result[0]["is_preprint"] is True
     assert result[0]["source"] == "arxiv"
+
+
+def test_arxiv_406_falls_back_to_public_html_search(monkeypatch) -> None:
+    from utils import frontier_service
+
+    html = b"""
+    <ol><li class="arxiv-result">
+      <p class="list-title is-inline-block"><a href="https://arxiv.org/abs/2609.01234">arXiv:2609.01234</a></p>
+      <p class="title is-5 mathjax"> Soil organic carbon mapping with remote sensing </p>
+      <p class="authors"><span>Authors:</span><a>A. Researcher</a><a>B. Scientist</a></p>
+      <p class="is-size-7"><span>Submitted</span> 17 September, 2026;</p>
+      <p class="abstract mathjax"><span class="abstract-full has-text-grey-dark mathjax">Abstract: A reproducible mapping study.</span></p>
+    </li></ol>
+    """
+    calls = []
+
+    def request(url, params, accept="application/atom+xml"):
+        calls.append((url, params, accept))
+        if url == frontier_service.ARXIV_API:
+            raise frontier_service.FrontierNetworkError("HTTP Error 406: Not Acceptable")
+        return html
+
+    monkeypatch.setattr(frontier_service, "_request_external_text", request)
+    rows = frontier_service._fetch_arxiv(
+        "soil organic carbon", date(2026, 9, 1), date(2026, 9, 18)
+    )
+
+    assert [call[0] for call in calls] == [frontier_service.ARXIV_API, frontier_service.ARXIV_SEARCH_URL]
+    assert calls[1][1]["query"] == "soil organic carbon"
+    assert "text/html" in calls[1][2]
+    assert rows[0]["title"] == "Soil organic carbon mapping with remote sensing"
+    assert rows[0]["published_date"] == "2026-09-17"
+    assert rows[0]["authors"] == ["A. Researcher", "B. Scientist"]
+    assert rows[0]["abstract"] == "A reproducible mapping study."
 
 
 def test_v12_refresh_persists_stream_states_and_core_mix(tmp_path: Path, monkeypatch) -> None:

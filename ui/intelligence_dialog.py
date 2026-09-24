@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
@@ -24,7 +25,9 @@ from PySide6.QtWidgets import (
 )
 
 from ui.theme import apply_dialog_theme
+from utils.easyscholar_service import easyscholar_readiness
 from utils.secure_store import SecretStoreError, protect_secret
+from utils.source_registry import SOURCE_REGISTRY, masked_source_summary, normalize_source_settings, update_source_secret
 
 
 class IntelligenceSettingsDialog(QDialog):
@@ -36,34 +39,45 @@ class IntelligenceSettingsDialog(QDialog):
         jcr: dict | None,
         easyscholar: dict | None = None,
         parent: QWidget | None = None,
+        *,
+        data_sources: dict | None = None,
+        embedded: bool = False,
     ) -> None:
         super().__init__(parent)
+        self._embedded = bool(embedded)
+        if self._embedded:
+            self.setWindowFlags(Qt.WindowType.Widget)
         self._ai = deepcopy(ai if isinstance(ai, dict) else {})
         self._jcr = deepcopy(jcr if isinstance(jcr, dict) else {})
         self._easyscholar = deepcopy(easyscholar if isinstance(easyscholar, dict) else {})
-        parent_width = parent.width() if parent else 520
-        parent_height = parent.height() if parent else 700
-        self.setWindowTitle("AI 与期刊数据")
-        self.setMinimumWidth(360)
-        self.setMaximumWidth(max(360, min(540, parent_width - 18)))
-        self.resize(max(360, min(500, parent_width - 18)), max(520, min(680, parent_height - 16)))
+        self._easyscholar_readiness = easyscholar_readiness(self._easyscholar)
+        self._data_sources = normalize_source_settings(data_sources)
+        self._source_controls: dict[str, dict[str, object]] = {}
+        if not self._embedded:
+            parent_width = parent.width() if parent else 520
+            parent_height = parent.height() if parent else 700
+            self.setWindowTitle("增强服务")
+            self.setMinimumWidth(360)
+            self.setMaximumWidth(max(360, min(540, parent_width - 18)))
+            self.resize(max(360, min(500, parent_width - 18)), max(520, min(680, parent_height - 16)))
         self._build_ui()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 18)
+        root.setContentsMargins(0 if self._embedded else 20, 0 if self._embedded else 18, 0 if self._embedded else 20, 0 if self._embedded else 18)
         root.setSpacing(10)
-        title = QLabel("AI 与期刊数据")
-        title.setObjectName("intelligenceTitle")
-        root.addWidget(title)
-        hint = QLabel(
-            "所有密钥只保存在当前 Windows 用户账户中。DeepSeek 用于文字理解与推荐；期刊指标可由 EasyScholar 更新，Clarivate 仍可作为独立核验来源。"
-        )
-        hint.setObjectName("intelligenceHint")
-        hint.setWordWrap(True)
-        hint.setMinimumWidth(0)
-        hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        root.addWidget(hint)
+        if not self._embedded:
+            title = QLabel("增强服务")
+            title.setObjectName("intelligenceTitle")
+            root.addWidget(title)
+            hint = QLabel(
+                "所有密钥只保存在当前 Windows 用户账户中。DeepSeek 用于文字理解与推荐；期刊指标可由 EasyScholar 更新，Clarivate 仍可作为独立核验来源。"
+            )
+            hint.setObjectName("intelligenceHint")
+            hint.setWordWrap(True)
+            hint.setMinimumWidth(0)
+            hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            root.addWidget(hint)
 
         scroll = QScrollArea()
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -167,6 +181,15 @@ class IntelligenceSettingsDialog(QDialog):
         self.ai_paper_fill.setChecked(bool(self._ai.get("paper_record_fill", True)))
         self.ai_quick_capture, ai_quick_capture_row = checkbox_row("允许 AI 识别自然语言快速录入")
         self.ai_quick_capture.setChecked(bool(self._ai.get("quick_capture", True)))
+        self.ai_local_materials, ai_local_materials_row = checkbox_row("允许 AI 按当前任务检索本地笔记、论文 PDF、投稿记录与审稿意见")
+        self.ai_local_materials.setChecked(bool(self._ai.get("local_material_access", True)))
+        self.ai_project_isolation, ai_project_isolation_row = checkbox_row("严格按当前项目 / 论文隔离本地资料")
+        self.ai_project_isolation.setChecked(bool(self._ai.get("local_material_project_isolation", True)))
+        self.ai_material_manifest, ai_material_manifest_row = checkbox_row("保存 AI 资料使用清单（仅类别、记录 ID 与哈希）")
+        self.ai_material_manifest.setChecked(bool(self._ai.get("local_material_use_manifest", True)))
+        material_log_button = QPushButton("查看最近资料使用清单")
+        material_log_button.setObjectName("subtleButton")
+        material_log_button.clicked.connect(self._show_material_manifest)
         for row in (
             ai_journal_enrichment_row,
             ai_journal_recommendation_row,
@@ -179,8 +202,12 @@ class IntelligenceSettingsDialog(QDialog):
             ai_journal_auto_row,
             ai_paper_fill_row,
             ai_quick_capture_row,
+            ai_local_materials_row,
+            ai_project_isolation_row,
+            ai_material_manifest_row,
         ):
             deepseek.addWidget(row)
+        deepseek.addWidget(material_log_button)
 
         jcr = card(
             "Clarivate JCR 核验",
@@ -215,9 +242,12 @@ class IntelligenceSettingsDialog(QDialog):
         easyscholar_form.addRow("服务状态", easyscholar_enabled_row)
         self.easyscholar_key = QLineEdit()
         self.easyscholar_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.easyscholar_key.setPlaceholderText(
-            "已保存（留空则保留）" if self._easyscholar.get("secret_key_secret") else "填写 EasyScholar 密钥"
-        )
+        if self._easyscholar_readiness.get("needs_reentry") and self._easyscholar.get("secret_key_secret"):
+            self.easyscholar_key.setPlaceholderText("当前密钥无法读取，请重新填写")
+        else:
+            self.easyscholar_key.setPlaceholderText(
+                "已保存（留空则保留）" if self._easyscholar.get("secret_key_secret") else "填写 EasyScholar 密钥"
+            )
         easyscholar_form.addRow("密钥", self.easyscholar_key)
         self.clear_easyscholar_key, clear_easyscholar_key_row = checkbox_row("清除已保存的 EasyScholar 密钥")
         easyscholar_form.addRow("密钥管理", clear_easyscholar_key_row)
@@ -230,41 +260,116 @@ class IntelligenceSettingsDialog(QDialog):
         easyscholar.addLayout(easyscholar_form)
         last_checked = str(self._easyscholar.get("last_auto_checked", "")).strip()
         easy_note = QLabel(
-            f"最近自动检查：{last_checked}" if last_checked else "未设置自动检查；可在期刊库“工具”中手动更新。"
+            str(self._easyscholar_readiness.get("message", ""))
+            if self._easyscholar_readiness.get("needs_reentry")
+            else f"最近自动检查：{last_checked}" if last_checked
+            else "未设置自动检查；可在期刊库“工具”中手动更新。"
         )
         easy_note.setObjectName("intelligenceHint")
         easy_note.setWordWrap(True)
         easyscholar.addWidget(easy_note)
 
+        sources = card(
+            "论文与特刊来源接口",
+            "六个每日前沿核心来源、四大出版社和第三方特刊来源均在这里开关。可选 Key 只保存加密值；留空会保留原 Key。",
+        )
+        group_names = {
+            "frontier_core": "每日前沿核心",
+            "frontier_fallback": "每日前沿回补",
+            "frontier_optional": "每日前沿可选",
+            "special_official": "特刊官网",
+            "special_third_party": "特刊第三方",
+        }
+        last_group = ""
+        for source_id, spec in SOURCE_REGISTRY.items():
+            group = str(spec.get("group", ""))
+            if group != last_group:
+                group_label = QLabel(group_names.get(group, group))
+                group_label.setObjectName("intelligenceCardTitle")
+                sources.addWidget(group_label)
+                last_group = group
+            current = self._data_sources[source_id]
+            row = QFrame()
+            row.setObjectName("intelligenceSourceRow")
+            row_box = QVBoxLayout(row)
+            row_box.setContentsMargins(8, 6, 8, 6)
+            row_box.setSpacing(5)
+            enabled = QCheckBox(str(spec.get("name", source_id)))
+            enabled.setChecked(bool(current.get("enabled", True)))
+            enabled.setToolTip(masked_source_summary(self._data_sources, source_id))
+            row_box.addWidget(enabled)
+            controls: dict[str, object] = {"enabled": enabled}
+            if spec.get("key_mode") != "none":
+                key_row = QHBoxLayout()
+                key = QLineEdit()
+                key.setEchoMode(QLineEdit.EchoMode.Password)
+                key.setPlaceholderText(
+                    "已保存（留空则保留）"
+                    if current.get("api_key_secret")
+                    else "API Key（可选）" if spec.get("key_mode") == "optional" else "API Key"
+                )
+                clear = QCheckBox("清除")
+                key_row.addWidget(key, 1)
+                key_row.addWidget(clear)
+                row_box.addLayout(key_row)
+                controls.update({"key": key, "clear": clear})
+            if spec.get("contact_email"):
+                email = QLineEdit(str(current.get("contact_email", "") or ""))
+                email.setPlaceholderText("联系邮箱（Crossref polite pool，建议填写）")
+                row_box.addWidget(email)
+                controls["contact_email"] = email
+            status = QLabel("当前：" + masked_source_summary(self._data_sources, source_id))
+            status.setObjectName("intelligenceHint")
+            row_box.addWidget(status)
+            sources.addWidget(row)
+            self._source_controls[source_id] = controls
+
         content_box.addStretch()
         scroll.setWidget(content)
         root.addWidget(scroll, 1)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        buttons.accepted.connect(self._validate_and_accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        if not self._embedded:
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
+            buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
+            buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+            buttons.accepted.connect(self._validate_and_accept)
+            buttons.rejected.connect(self.reject)
+            root.addWidget(buttons)
         apply_dialog_theme(self)
 
-    def _validate_and_accept(self) -> None:
+    def validate(self) -> bool:
+        """Validate the visible service configuration without closing an embedded panel."""
         has_ai_key = bool(self.ai_key.text().strip() or (self._ai.get("api_key_secret") and not self.clear_ai_key.isChecked()))
         has_jcr_key = bool(self.jcr_key.text().strip() or (self._jcr.get("api_key_secret") and not self.clear_jcr_key.isChecked()))
         has_easyscholar_key = bool(
             self.easyscholar_key.text().strip()
-            or (self._easyscholar.get("secret_key_secret") and not self.clear_easyscholar_key.isChecked())
+            or (
+                self._easyscholar.get("secret_key_secret")
+                and self._easyscholar_readiness.get("ready")
+                and not self.clear_easyscholar_key.isChecked()
+            )
         )
         if self.ai_enabled.isChecked() and not has_ai_key:
             QMessageBox.warning(self, "缺少 API Key", "启用 DeepSeek 前请填写 API Key，或取消启用。")
-            return
+            return False
         if self.jcr_enabled.isChecked() and not self.jcr_endpoint.text().strip():
             QMessageBox.warning(self, "缺少 JCR 地址", "请粘贴已授权的 Clarivate Journals API 请求地址，或取消启用。")
-            return
+            return False
         if self.jcr_enabled.isChecked() and not has_jcr_key:
             QMessageBox.warning(self, "缺少 API Key", "启用 Clarivate JCR 前请填写 API Key，或取消启用。")
-            return
+            return False
         if self.easyscholar_enabled.isChecked() and not has_easyscholar_key:
-            QMessageBox.warning(self, "缺少密钥", "启用 EasyScholar 前请填写密钥，或取消启用。")
+            message = (
+                "当前保存的 EasyScholar 密钥无法解密，请重新填写后再保存。"
+                if self._easyscholar_readiness.get("needs_reentry")
+                and self._easyscholar.get("secret_key_secret")
+                else "启用 EasyScholar 前请填写密钥，或取消启用。"
+            )
+            QMessageBox.warning(self, "需要重新填写密钥", message)
+            return False
+        return True
+
+    def _validate_and_accept(self) -> None:
+        if not self.validate():
             return
         self.accept()
 
@@ -300,6 +405,9 @@ class IntelligenceSettingsDialog(QDialog):
                 "journal_auto_enrichment": self.ai_journal_auto.isChecked(),
                 "paper_record_fill": self.ai_paper_fill.isChecked(),
                 "quick_capture": self.ai_quick_capture.isChecked(),
+                "local_material_access": self.ai_local_materials.isChecked(),
+                "local_material_project_isolation": self.ai_project_isolation.isChecked(),
+                "local_material_use_manifest": self.ai_material_manifest.isChecked(),
             }
         )
         jcr.update(
@@ -316,6 +424,43 @@ class IntelligenceSettingsDialog(QDialog):
             }
         )
         return ai, jcr, easyscholar
+
+    def _show_material_manifest(self) -> None:
+        from utils.ai_material_context import load_ai_material_manifests
+
+        entries = load_ai_material_manifests(8)
+        if not entries:
+            QMessageBox.information(self, "AI 资料使用清单", "尚无本地资料被 AI 调用使用。")
+            return
+        lines: list[str] = []
+        for entry in reversed(entries):
+            categories = [str(value.get("category", "")) for value in entry.get("materials", []) if isinstance(value, dict)]
+            lines.append(
+                f"{entry.get('created_at', '')} · {entry.get('task', '')}\n"
+                f"论文/项目：{entry.get('paper_id') or entry.get('project_id') or '全局画像'}\n"
+                f"资料：{'、'.join(categories) or '无'} · 清单 {entry.get('id', '')}"
+            )
+        QMessageBox.information(self, "AI 资料使用清单", "\n\n".join(lines))
+
+    def data_sources_values(self) -> dict:
+        """Return normalized encrypted source settings without exposing secrets."""
+        values = normalize_source_settings(self._data_sources)
+        try:
+            for source_id, controls in self._source_controls.items():
+                enabled = controls["enabled"]
+                values[source_id]["enabled"] = bool(enabled.isChecked())
+                key = controls.get("key")
+                clear = controls.get("clear")
+                if clear is not None and clear.isChecked():
+                    values = update_source_secret(values, source_id, "")
+                elif key is not None and key.text().strip():
+                    values = update_source_secret(values, source_id, key.text().strip())
+                email = controls.get("contact_email")
+                if email is not None:
+                    values[source_id]["contact_email"] = email.text().strip()[:254]
+        except SecretStoreError as error:
+            raise RuntimeError(f"无法加密来源 API Key：{error}") from error
+        return normalize_source_settings(values)
 
     @staticmethod
     def _protect(value: str, service: str) -> str:

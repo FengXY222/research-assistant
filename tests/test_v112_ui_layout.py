@@ -150,6 +150,6 @@ class V112LayoutTests(TestCase):
                 continue
             right = child.mapTo(content, child.rect().bottomRight()).x()
             self.assertLessEqual(right, content.width() + 1, child.objectName() or child.text())
-        self.assertGreaterEqual(dialog.theme_selector.width(), 120)
+        self.assertFalse(hasattr(dialog, "theme_selector"))
         self.assertGreaterEqual(dialog.density_selector.width(), 120)
         dialog.close()

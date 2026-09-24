@@ -79,17 +79,18 @@ class JournalSelectionWorkbenchUiTests(TestCase):
         self.assertEqual(requirements["jcr_quartiles"], ["Q1", "Q2"])
         self.assertEqual(requirements["cas_quartiles"], ["1", "2"])
 
-    def test_waiting_and_unconfigured_ai_states_keep_results_empty_until_a_real_ai_run(self) -> None:
+    def test_selection_starts_rule_pipeline_even_when_ai_is_unconfigured(self) -> None:
         self.assertTrue(self.dialog.ai_status.text().strip())
         self.assertFalse(self.dialog._candidates)
         self.assertEqual(self.dialog.candidate_list.count(), 0)
 
-        with patch("ui.journal_selection_dialog.is_deepseek_ready", return_value=False):
+        with patch("ui.journal_selection_dialog.JournalSelectionAiThread.start") as start:
             self.dialog._run_ai_recommendation()
 
-        self.assertIn("尚未配置", self.dialog.ai_status.text())
+        self.assertIn("正在准备论文", self.dialog.ai_status.text())
         self.assertFalse(self.dialog._candidates)
         self.assertFalse(self.dialog.add_button.isEnabled())
+        start.assert_called_once()
 
     def test_result_rows_show_a_compact_ai_total_and_reason_without_legacy_detail_blocks(self) -> None:
         self.dialog.apply_ai_recommendation(
@@ -128,7 +129,7 @@ class JournalSelectionWorkbenchUiTests(TestCase):
         self.application.processEvents()
         options = multi.option_checkboxes()
 
-        self.assertEqual(len(options), 4)
+        self.assertEqual(len(options), 2)
         options[0].click()
         self.application.processEvents()
         self.assertTrue(multi.popup_menu().isVisible())
@@ -189,7 +190,7 @@ class JournalSelectionWorkbenchUiTests(TestCase):
         )
 
         self.assertNotIn("已更新", self.dialog.ai_status.text())
-        self.assertIn("没有期刊通过", self.dialog.ai_status.text())
+        self.assertIn("没有召回到可核验候选", self.dialog.ai_status.text())
 
     def test_narrow_workbench_has_no_horizontal_scroll_and_visible_actions(self) -> None:
         for width in (380, 460, 540):

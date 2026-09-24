@@ -22,10 +22,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from utils.autostart import is_autostart_enabled, set_autostart
+from utils.autostart import autostart_status, is_autostart_enabled, set_autostart
 from utils.app_info import APP_VERSION
-from ui.intelligence_dialog import IntelligenceSettingsDialog
-from ui.theme import apply_dialog_theme, theme_choices
+from utils.source_registry import normalize_source_settings
+from ui.theme import apply_dialog_theme
 from utils.file_manager import (
     change_data_location,
     create_backup,
@@ -115,40 +115,46 @@ class SettingsDialog(QDialog):
     theme_previewed = Signal(str, str)
     theme_preview_reverted = Signal(str, str)
 
-    def __init__(self, settings: dict, parent: QWidget | None = None) -> None:
+    def __init__(self, settings: dict, parent: QWidget | None = None, *, embedded: bool = False) -> None:
         super().__init__(parent)
+        self._embedded = bool(embedded)
+        if self._embedded:
+            self.setWindowFlags(Qt.WindowType.Widget)
         self._settings = settings
         appearance = settings.get("appearance", {}) if isinstance(settings.get("appearance"), dict) else {}
-        self._initial_theme_id = str(appearance.get("theme_id", "fog_teal"))
+        self._initial_theme_id = "fog_teal"
         self._initial_density = str(appearance.get("density", "comfortable"))
         self._ai_settings = dict(settings.get("ai", {})) if isinstance(settings.get("ai"), dict) else {}
         self._jcr_settings = dict(settings.get("jcr", {})) if isinstance(settings.get("jcr"), dict) else {}
         self._easyscholar_settings = (
             dict(settings.get("easyscholar", {})) if isinstance(settings.get("easyscholar"), dict) else {}
         )
+        self._data_sources_settings = normalize_source_settings(settings.get("data_sources"))
         self._initial_autostart = is_autostart_enabled()
-        self.setWindowTitle("设置")
-        parent_width = parent.width() if parent else 480
-        parent_height = parent.height() if parent else 720
-        self.setMinimumWidth(350)
-        self.setMaximumWidth(max(350, min(500, parent_width - 24)))
-        self.setMinimumHeight(500)
-        self.resize(max(350, min(460, parent_width - 24)), max(500, min(710, parent_height - 12)))
+        if not self._embedded:
+            self.setWindowTitle("设置")
+            parent_width = parent.width() if parent else 480
+            parent_height = parent.height() if parent else 720
+            self.setMinimumWidth(350)
+            self.setMaximumWidth(max(350, min(500, parent_width - 24)))
+            self.setMinimumHeight(500)
+            self.resize(max(350, min(460, parent_width - 24)), max(500, min(710, parent_height - 12)))
         self._build_ui()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(22, 20, 22, 18)
+        root.setContentsMargins(0 if self._embedded else 22, 0 if self._embedded else 20, 0 if self._embedded else 22, 0 if self._embedded else 18)
         root.setSpacing(10)
-        title = QLabel("设置")
-        title.setObjectName("settingsTitle")
-        root.addWidget(title)
-        hint = QLabel(f"科研助手 v{APP_VERSION} · 窗口、提醒与本地数据都在这里管理。")
-        hint.setObjectName("settingsHint")
-        hint.setWordWrap(True)
-        hint.setMinimumWidth(0)
-        hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        root.addWidget(hint)
+        if not self._embedded:
+            title = QLabel("设置")
+            title.setObjectName("settingsTitle")
+            root.addWidget(title)
+            hint = QLabel(f"科研助手 v{APP_VERSION} · 窗口、提醒与本地数据都在这里管理。")
+            hint.setObjectName("settingsHint")
+            hint.setWordWrap(True)
+            hint.setMinimumWidth(0)
+            hint.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            root.addWidget(hint)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -209,23 +215,15 @@ class SettingsDialog(QDialog):
 
         appearance_section = section(
             "外观",
-            "调整小组件配色和信息密度。",
+            "统一使用雾青蓝主题，可按屏幕大小调整信息密度。",
         )
         appearance_form = form_layout()
-        self.theme_selector = QComboBox()
-        for theme_id, theme_name in theme_choices():
-            self.theme_selector.addItem(theme_name, theme_id)
-        theme_index = self.theme_selector.findData(self._initial_theme_id)
-        self.theme_selector.setCurrentIndex(theme_index if theme_index >= 0 else 0)
-        appearance_form.addRow("界面配色", self.theme_selector)
-
         self.density_selector = QComboBox()
         self.density_selector.addItem("舒适（默认）", "comfortable")
         self.density_selector.addItem("紧凑（更多信息）", "compact")
         density_index = self.density_selector.findData(self._initial_density)
         self.density_selector.setCurrentIndex(density_index if density_index >= 0 else 0)
         appearance_form.addRow("信息密度", self.density_selector)
-        self.theme_selector.currentIndexChanged.connect(self._preview_theme)
         self.density_selector.currentIndexChanged.connect(self._preview_theme)
         appearance_section.addLayout(appearance_form)
 
@@ -247,6 +245,10 @@ class SettingsDialog(QDialog):
         self.always_on_top, always_on_top_row = checkbox_row("窗口始终置顶")
         self.always_on_top.setChecked(bool(self._settings.get("always_on_top", True)))
         window_form.addRow("窗口层级", always_on_top_row)
+
+        self.close_to_tray, close_to_tray_row = checkbox_row("点击关闭按钮时仅收起到系统托盘，不退出科研助手")
+        self.close_to_tray.setChecked(bool(self._settings.get("close_to_tray", False)))
+        window_form.addRow("仅最小化不退出", close_to_tray_row)
 
         self.click_through, click_through_row = checkbox_row("鼠标点击穿透窗口（双击“科研助手”解除）")
         self.click_through.setChecked(bool(self._settings.get("click_through", False)))
@@ -281,6 +283,13 @@ class SettingsDialog(QDialog):
         self.autostart, autostart_row = checkbox_row("登录 Windows 后自动运行科研助手")
         self.autostart.setChecked(self._initial_autostart)
         reminder_form.addRow("开机自启动", autostart_row)
+        startup_probe = autostart_status()
+        self.autostart_status_label = QLabel(
+            "状态：" + str(startup_probe.get("message", "尚未检测"))
+        )
+        self.autostart_status_label.setObjectName("settingsHint")
+        self.autostart_status_label.setWordWrap(True)
+        reminder_form.addRow("启动探测", self.autostart_status_label)
 
         self.ready_submission, ready_submission_row = checkbox_row("准备投稿时显示论文与目标期刊提示")
         self.ready_submission.setChecked(bool(self._settings.get("ready_submission_reminder", True)))
@@ -349,24 +358,6 @@ class SettingsDialog(QDialog):
         reminder_form.addRow("每日前沿", frontier_background_row)
         reminder_section.addLayout(reminder_form)
 
-        intelligence_section = section(
-            "智能增强与 JCR",
-            "DeepSeek 用于中文信息补全与推荐复核；JCR 分区只接受 Clarivate Journals API 的核验结果。",
-        )
-        intelligence_row = QHBoxLayout()
-        self.intelligence_status = QLabel()
-        self.intelligence_status.setObjectName("settingsHint")
-        self.intelligence_status.setWordWrap(True)
-        self.intelligence_status.setMinimumWidth(0)
-        self.intelligence_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        intelligence_row.addWidget(self.intelligence_status, 1)
-        intelligence_button = QPushButton("配置")
-        intelligence_button.setObjectName("intelligenceButton")
-        intelligence_button.clicked.connect(self._open_intelligence_settings)
-        intelligence_row.addWidget(intelligence_button)
-        intelligence_section.addLayout(intelligence_row)
-        self._refresh_intelligence_summary()
-
         data_section = section("数据与备份", "所有记录仍保存在本机；导入旧版数据前会先创建当前数据快照。")
         data_form = form_layout()
 
@@ -428,12 +419,13 @@ class SettingsDialog(QDialog):
         scroll.setWidget(content)
         root.addWidget(scroll, 1)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        buttons.accepted.connect(self._save)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        if not self._embedded:
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
+            buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
+            buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+            buttons.accepted.connect(self._save)
+            buttons.rejected.connect(self.reject)
+            root.addWidget(buttons)
         # Existing versions carried a local navy QSS. Replace it after the
         # controls have been built so this dialog follows the selected theme
         # just like the main workspace and its popup lists.
@@ -499,53 +491,9 @@ class SettingsDialog(QDialog):
         self.backup_status.setText(f"已导入 {copied} 个旧版数据文件；导入前数据已尝试备份。")
         self.data_location_changed.emit()
 
-    def _open_intelligence_settings(self) -> None:
-        dialog = IntelligenceSettingsDialog(
-            self._ai_settings,
-            self._jcr_settings,
-            self._easyscholar_settings,
-            self,
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        try:
-            self._ai_settings, self._jcr_settings, self._easyscholar_settings = dialog.values()
-        except RuntimeError as error:
-            QMessageBox.warning(self, "无法保存密钥", str(error))
-            return
-        self._refresh_intelligence_summary()
-
-    def _refresh_intelligence_summary(self) -> None:
-        ai_enabled = bool(self._ai_settings.get("enabled", False))
-        ai_key = bool(self._ai_settings.get("api_key_secret", ""))
-        ai_model = str(self._ai_settings.get("model", "deepseek-v4-flash"))
-        jcr_enabled = bool(self._jcr_settings.get("enabled", False))
-        jcr_ready = bool(self._jcr_settings.get("endpoint_template", "") and self._jcr_settings.get("api_key_secret", ""))
-        ai_text = f"DeepSeek：{'已启用' if ai_enabled and ai_key else '未配置'}"
-        if ai_enabled and ai_key:
-            ai_text += f"（{ai_model}）"
-        profile_auto = bool(
-            self._ai_settings.get("research_profile_update", True)
-            and (
-                self._ai_settings.get("auto_profile_from_achievements", True)
-                or self._ai_settings.get("auto_profile_from_frontier", True)
-            )
-        )
-        journal_auto = bool(self._ai_settings.get("journal_auto_enrichment", True))
-        automation_text = "每日自动化："
-        automation_text += "画像校准已开" if profile_auto else "画像校准关闭"
-        automation_text += " · 新期刊补全已开" if journal_auto else " · 新期刊补全关闭"
-        jcr_text = f"JCR：{'已配置核验' if jcr_enabled and jcr_ready else '待配置 Clarivate 授权'}"
-        easyscholar_ready = bool(
-            self._easyscholar_settings.get("enabled", False)
-            and self._easyscholar_settings.get("secret_key_secret", "")
-        )
-        easy_text = f"EasyScholar：{'已配置期刊指标更新' if easyscholar_ready else '待配置可选密钥'}"
-        self.intelligence_status.setText(ai_text + "\n" + automation_text + "\n" + jcr_text + "\n" + easy_text)
-
     def _preview_theme(self) -> None:
         self.theme_previewed.emit(
-            str(self.theme_selector.currentData()),
+            "fog_teal",
             str(self.density_selector.currentData()),
         )
 
@@ -558,13 +506,14 @@ class SettingsDialog(QDialog):
         """Return every settings value owned by this dialog for safe merging."""
         return {
             "appearance": {
-                "theme_id": str(self.theme_selector.currentData()),
+                "theme_id": "fog_teal",
                 "density": str(self.density_selector.currentData()),
             },
             "application_mode": "widget",
             "opacity": self.opacity_slider.value(),
             "always_on_top": self.always_on_top.isChecked(),
             "autostart": self.autostart.isChecked(),
+            "close_to_tray": self.close_to_tray.isChecked(),
             "click_through": self.click_through.isChecked(),
             "ready_submission_reminder": self.ready_submission.isChecked(),
             "sidebar_auto_hide": self.sidebar_auto_hide.isChecked(),
@@ -583,6 +532,7 @@ class SettingsDialog(QDialog):
             "ai": dict(self._ai_settings),
             "jcr": dict(self._jcr_settings),
             "easyscholar": dict(self._easyscholar_settings),
+            "data_sources": normalize_source_settings(self._data_sources_settings),
             "auto_backup": self.auto_backup.isChecked(),
             "research": dict(self._settings.get("research", {})),
             "window": dict(self._settings.get("window", {})),
@@ -590,25 +540,33 @@ class SettingsDialog(QDialog):
             "software_window": dict(self._settings.get("software_window", {})),
         }
 
-    def _save(self) -> None:
+    def prepare_save(self) -> bool:
+        """Validate general settings and apply the autostart side effect."""
         if self.journal_import_shortcut_mode.currentData() == "sequence" and self.journal_import_shortcut_sequence.keySequence().isEmpty():
             QMessageBox.warning(self, "缺少快捷键", "请按下带 Ctrl、Alt、Shift 或 Win 的组合键，或改为“全局双击 Tab”/“关闭快捷键”。")
-            return
+            return False
         if self.window_visibility_shortcut_mode.currentData() == "sequence" and self.window_visibility_shortcut_sequence.keySequence().isEmpty():
             QMessageBox.warning(self, "缺少快捷键", "请按下带 Ctrl、Alt、Shift 或 Win 的组合键，或改为“全局双击空格”/“关闭快捷键”。")
-            return
+            return False
         enabled = self.autostart.isChecked()
         if enabled != self._initial_autostart:
             try:
-                set_autostart(enabled)
+                startup_probe = set_autostart(enabled)
             except OSError as error:
                 QMessageBox.warning(self, "无法更新开机启动", str(error))
-                return
+                return False
+            self.autostart_status_label.setText("状态：" + str(startup_probe.get("message", "已更新")))
+            self._initial_autostart = bool(startup_probe.get("enabled"))
         # Daily AI jobs can update this marker while the settings window is
         # open. Keep the newest persisted value when saving unrelated options.
         latest_ai = load_app_settings().get("ai", {})
         if isinstance(latest_ai, dict) and str(latest_ai.get("journal_auto_last_checked", "")).strip():
             self._ai_settings["journal_auto_last_checked"] = str(latest_ai["journal_auto_last_checked"])
+        return True
+
+    def _save(self) -> None:
+        if not self.prepare_save():
+            return
         self.settings_saved.emit(self.values())
         self.accept()
 

@@ -8,6 +8,7 @@ this module is imported, so application upgrades cannot replace user records.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import sys
@@ -21,6 +22,7 @@ from utils.journal_catalog import default_land_science_catalog
 from utils.publisher_utils import canonical_publisher
 from utils.app_info import APP_NAME
 from utils.research_profile_service import normalize_research_profile_v11
+from utils.source_registry import default_source_settings, normalize_source_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -159,9 +161,11 @@ READINGS_FILE = DATA_DIR / "readings.json"
 JOURNALS_FILE = DATA_DIR / "journals.json"
 FRONTIER_FILE = DATA_DIR / "frontier.json"
 SPECIAL_ISSUES_FILE = DATA_DIR / "special_issues.json"
+SPECIAL_ISSUES_SUMMARY_FILE = DATA_DIR / "special_issues_summary.json"
 PDF_RESEARCH_CACHE_FILE = DATA_DIR / "achievement_pdf_cache.json"
 RESEARCH_PROFILE_FILE = DATA_DIR / "research_profile.json"
 RESEARCH_INTELLIGENCE_CACHE_FILE = DATA_DIR / "research_intelligence.sqlite"
+V13_RUNTIME_FILE = DATA_DIR / "runtime_v13.json"
 BACKUP_DIR = DATA_DIR / "backups"
 BACKUP_FILE_NAMES = (
     TODO_FILE.name,
@@ -185,8 +189,8 @@ def _set_data_dir(directory: Path) -> None:
     """Update all active JSON paths after a successful local storage switch."""
     global DATA_DIR, TODO_FILE, TODO_META_FILE, PAPERS_FILE, ACHIEVEMENTS_FILE, REJECTION_ARCHIVE_FILE
     global SELECTION_FEEDBACK_FILE, INSPIRATION_FILE
-    global REMINDER_FILE, SETTINGS_FILE, READINGS_FILE, JOURNALS_FILE, FRONTIER_FILE, SPECIAL_ISSUES_FILE, PDF_RESEARCH_CACHE_FILE
-    global RESEARCH_PROFILE_FILE, RESEARCH_INTELLIGENCE_CACHE_FILE, BACKUP_DIR
+    global REMINDER_FILE, SETTINGS_FILE, READINGS_FILE, JOURNALS_FILE, FRONTIER_FILE, SPECIAL_ISSUES_FILE, SPECIAL_ISSUES_SUMMARY_FILE, PDF_RESEARCH_CACHE_FILE
+    global RESEARCH_PROFILE_FILE, RESEARCH_INTELLIGENCE_CACHE_FILE, V13_RUNTIME_FILE, BACKUP_DIR
     DATA_DIR = directory
     TODO_FILE = DATA_DIR / "todo.json"
     TODO_META_FILE = DATA_DIR / "todo_meta.json"
@@ -201,9 +205,11 @@ def _set_data_dir(directory: Path) -> None:
     JOURNALS_FILE = DATA_DIR / "journals.json"
     FRONTIER_FILE = DATA_DIR / "frontier.json"
     SPECIAL_ISSUES_FILE = DATA_DIR / "special_issues.json"
+    SPECIAL_ISSUES_SUMMARY_FILE = DATA_DIR / "special_issues_summary.json"
     PDF_RESEARCH_CACHE_FILE = DATA_DIR / "achievement_pdf_cache.json"
     RESEARCH_PROFILE_FILE = DATA_DIR / "research_profile.json"
     RESEARCH_INTELLIGENCE_CACHE_FILE = DATA_DIR / "research_intelligence.sqlite"
+    V13_RUNTIME_FILE = DATA_DIR / "runtime_v13.json"
     BACKUP_DIR = DATA_DIR / "backups"
 
 
@@ -224,9 +230,11 @@ def _save_storage_location(directory: Path) -> None:
     raise errors[-1] if errors else OSError("无法保存数据位置设置")
 
 DEFAULT_APP_SETTINGS = {
+    "schema_version": 13,
     "opacity": 96,
     "always_on_top": True,
     "autostart": False,
+    "close_to_tray": False,
     "click_through": False,
     "ready_submission_reminder": True,
     "sidebar_auto_hide": True,
@@ -258,6 +266,11 @@ DEFAULT_APP_SETTINGS = {
         "journal_auto_last_checked": "",
         "paper_record_fill": True,
         "quick_capture": True,
+        # The user explicitly allowed these materials, but every call still
+        # applies project isolation and task-minimised retrieval.
+        "local_material_access": True,
+        "local_material_project_isolation": True,
+        "local_material_use_manifest": True,
     },
     "jcr": {
         "enabled": False,
@@ -270,7 +283,8 @@ DEFAULT_APP_SETTINGS = {
         "cache_days": 30,
         "last_auto_checked": "",
     },
-    "auto_backup": False,
+    "data_sources": default_source_settings(),
+    "auto_backup": True,
     "nav_order": ["home", "todo", "papers", "notes", "journals", "frontier", "achievements"],
     "appearance": {"theme_id": "fog_teal", "density": "comfortable"},
     "application_mode": "widget",
@@ -301,20 +315,7 @@ DEFAULT_APP_SETTINGS = {
     },
 }
 
-THEME_IDS = (
-    "fog_teal",
-    "ink_white",
-    "moss_paper",
-    "warm_sand",
-    "graphite_mist",
-    "night_sea",
-    "cinnabar_paper",
-    "violet_grove",
-    "night_coral",
-    "sunrise_cloud",
-    "aurora_night",
-    "iris_sun",
-)
+THEME_IDS = ("fog_teal",)
 WORKBENCH_IDS = ("home", "work", "papers", "library")
 
 DEFAULT_RESEARCH_AXES = (
@@ -342,24 +343,28 @@ DEFAULT_RESEARCH_AXES = (
 )
 
 DEFAULT_FRONTIER_SOURCES = {
-    # Crossref, OpenAlex and DOAJ work without a personal account. Semantic
-    # Scholar is opt-in because its public anonymous quota is intentionally
-    # small; a personal key can be supplied in the research settings.
-    "crossref": {"enabled": True, "api_key": ""},
-    "openalex": {"enabled": True, "api_key": ""},
-    "doaj": {"enabled": True, "api_key": ""},
-    "semantic_scholar": {"enabled": False, "api_key": ""},
-    "arxiv": {"enabled": False, "api_key": ""},
+    # Credentials no longer live here.  The research profile keeps only
+    # enablement and a reference to the DPAPI-protected Settings entry.
+    "crossref": {"enabled": True, "credential_ref": "settings.data_sources.crossref"},
+    "openalex": {"enabled": True, "credential_ref": "settings.data_sources.openalex"},
+    "doaj": {"enabled": True, "credential_ref": "settings.data_sources.doaj"},
+    "semantic_scholar": {"enabled": True, "credential_ref": "settings.data_sources.semantic_scholar"},
+    "europe_pmc": {"enabled": True, "credential_ref": "settings.data_sources.europe_pmc"},
+    "arxiv": {"enabled": True, "credential_ref": "settings.data_sources.arxiv"},
 }
 
 DEFAULT_FRONTIER_PROFILE = {
-    "version": 5,
+    "version": 13,
     "primary_keywords": [],
     "secondary_keywords": [],
     "negative_keywords": [],
+    # ``daily_limit`` is retained only for lossless migration; v13 never uses
+    # it to cap display.  The normal overlap window is fixed by policy.
     "daily_limit": 5,
-    "lookback_days": 7,
+    "lookback_days": 14,
     "notify": True,
+    "retain_unread": True,
+    "show_preprints": True,
     "sources": DEFAULT_FRONTIER_SOURCES,
     "feedback": {"axis_weights": {}},
 }
@@ -732,6 +737,9 @@ def _normalize_ai_settings(raw: Any) -> dict[str, Any]:
         "journal_auto_last_checked": str(raw.get("journal_auto_last_checked", "")).strip(),
         "paper_record_fill": bool(raw.get("paper_record_fill", True)),
         "quick_capture": bool(raw.get("quick_capture", True)),
+        "local_material_access": bool(raw.get("local_material_access", True)),
+        "local_material_project_isolation": bool(raw.get("local_material_project_isolation", True)),
+        "local_material_use_manifest": bool(raw.get("local_material_use_manifest", True)),
     }
 
 
@@ -858,9 +866,11 @@ def normalize_app_settings(payload: Any) -> dict[str, Any]:
     )
     normalized.update(
         {
+            "schema_version": _integer(payload.get("schema_version"), 13, 0, 13),
             "opacity": _integer(payload.get("opacity"), 96, 20, 100),
             "always_on_top": bool(payload.get("always_on_top", True)),
             "autostart": bool(payload.get("autostart", False)),
+            "close_to_tray": bool(payload.get("close_to_tray", False)),
             "click_through": bool(payload.get("click_through", False)),
             "ready_submission_reminder": bool(payload.get("ready_submission_reminder", True)),
             "sidebar_auto_hide": bool(payload.get("sidebar_auto_hide", True)),
@@ -877,7 +887,8 @@ def normalize_app_settings(payload: Any) -> dict[str, Any]:
             "ai": _normalize_ai_settings(payload.get("ai")),
             "jcr": _normalize_jcr_settings(payload.get("jcr")),
             "easyscholar": _normalize_easyscholar_settings(payload.get("easyscholar")),
-            "auto_backup": bool(payload.get("auto_backup", False)),
+            "data_sources": normalize_source_settings(payload.get("data_sources")),
+            "auto_backup": bool(payload.get("auto_backup", True)),
             "nav_order": nav_order,
             "appearance": {"theme_id": theme_id if theme_id in THEME_IDS else "fog_teal", "density": density if density in {"compact", "comfortable"} else "comfortable"},
             # v12 has one compact shell. Retain legacy geometry elsewhere for
@@ -1022,15 +1033,14 @@ def _normalize_frontier_profile(raw: Any) -> dict[str, Any]:
     for source_id, defaults in DEFAULT_FRONTIER_SOURCES.items():
         current = raw_sources.get(source_id, {})
         current = current if isinstance(current, dict) else {}
-        key = str(current.get("api_key", defaults["api_key"])).strip()
         sources[source_id] = {
             "enabled": bool(current.get("enabled", defaults["enabled"])),
-            # Keys live only in the user's local frontier.json. Keep a
-            # conservative bound so a pasted response cannot bloat backups.
-            "api_key": key[:512],
+            "credential_ref": str(
+                current.get("credential_ref", defaults.get("credential_ref", f"settings.data_sources.{source_id}"))
+            ).strip()[:120],
         }
     legacy_result = {
-        "version": 6,
+        "version": 13,
         "primary_keywords": primary_keywords,
         "secondary_keywords": secondary_keywords,
         "negative_keywords": normalize_terms(raw.get("negative_keywords"), []),
@@ -1045,8 +1055,10 @@ def _normalize_frontier_profile(raw: Any) -> dict[str, Any]:
         "ai_profile_source_signature": str(raw.get("ai_profile_source_signature", "")).strip()[:80],
         "ai_profile_last_checked_at": str(raw.get("ai_profile_last_checked_at", "")).strip(),
         "daily_limit": daily_limit,
-        "lookback_days": _integer(raw.get("lookback_days"), 7, 1, 30),
+        "lookback_days": _integer(raw.get("lookback_days"), 14, 1, 90),
         "notify": bool(raw.get("notify", True)),
+        "retain_unread": bool(raw.get("retain_unread", True)),
+        "show_preprints": bool(raw.get("show_preprints", True)),
         "sources": sources,
         "feedback": {"axis_weights": weights, "term_weights": term_weights},
         "require_verified_jcr_q1_q2": bool(raw.get("require_verified_jcr_q1_q2", True)),
@@ -1071,6 +1083,15 @@ def _normalize_frontier_profile(raw: Any) -> dict[str, Any]:
         "last_organization_snapshot",
         "last_auto_organization_date",
         "auto_organization_suppressed_for_date",
+        "projects",
+        "primary_project_id",
+        "confirmed_authors",
+        "confirmed_teams",
+        "confirmed_topics",
+        "semantic_seed_ids",
+        "citation_seed_ids",
+        "behavior_learning_enabled",
+        "behavior_learning_cleared_at",
     )
     return normalize_research_profile_v11(
         {**legacy_result, **{key: raw[key] for key in profile_keys if key in raw}}
@@ -1108,7 +1129,7 @@ def _normalize_frontier_item(raw: Any) -> dict[str, Any] | None:
         "match_mode": str(raw.get("match_mode", "title_abstract")).strip()
         if str(raw.get("match_mode", "title_abstract")).strip() in {"source_keywords", "title_abstract"}
         else "title_abstract",
-        "source_names": [str(value).strip() for value in raw.get("source_names", []) if str(value).strip()][:6]
+        "source_names": [str(value).strip() for value in raw.get("source_names", []) if str(value).strip()][:20]
         if isinstance(raw.get("source_names"), list)
         else [],
         "authors": [str(value).strip() for value in raw.get("authors", []) if str(value).strip()]
@@ -1134,7 +1155,11 @@ def _normalize_frontier_item(raw: Any) -> dict[str, Any] | None:
         "journal_quality_flag": str(raw.get("journal_quality_flag", "")).strip()[:40],
         "filtered_by_quality": bool(raw.get("filtered_by_quality", False)),
         "feedback_adjustment": _integer(raw.get("feedback_adjustment"), 0, -30, 30),
-        "ai_adjustment": _integer(raw.get("ai_adjustment"), 0, -15, 15),
+        # v13 stores a per-axis mapping or ``None``.  Never coerce unavailable
+        # AI into a numeric zero.
+        "ai_adjustment": deepcopy(raw.get("ai_adjustment"))
+        if raw.get("ai_adjustment") is None or isinstance(raw.get("ai_adjustment"), dict)
+        else _integer(raw.get("ai_adjustment"), 0, -34, 34),
         "feedback_events": [dict(event) for event in raw.get("feedback_events", []) if isinstance(event, dict)][-100:]
         if isinstance(raw.get("feedback_events"), list)
         else [],
@@ -1180,6 +1205,26 @@ def _normalize_frontier_item(raw: Any) -> dict[str, Any] | None:
         "fetched_at": str(raw.get("fetched_at", "")).strip(),
         "recommendation_date": str(raw.get("recommendation_date", "")).strip(),
         "first_seen_date": str(raw.get("first_seen_date", "")).strip(),
+        "first_seen_at": str(raw.get("first_seen_at", raw.get("first_seen_date", ""))).strip(),
+        "last_verified_at": str(raw.get("last_verified_at", "")).strip(),
+        "candidate_state": str(raw.get("candidate_state", "raw")).strip()[:60],
+        "fingerprint": str(raw.get("fingerprint", "")).strip()[:220],
+        "work_family_id": str(raw.get("work_family_id", "")).strip()[:220],
+        "recall_strategies": [str(value).strip() for value in raw.get("recall_strategies", []) if str(value).strip()][:12]
+        if isinstance(raw.get("recall_strategies"), list)
+        else [],
+        "relevance_axis": deepcopy(raw.get("relevance_axis")) if isinstance(raw.get("relevance_axis"), dict) else {},
+        "value_axis": deepcopy(raw.get("value_axis")) if isinstance(raw.get("value_axis"), dict) else {},
+        "relevance_score": _integer(raw.get("relevance_score"), 0, 0, 100),
+        "research_value_score": _integer(raw.get("research_value_score"), 0, 0, 100),
+        "pyramid_level": str(raw.get("pyramid_level", "")).strip().upper()
+        if str(raw.get("pyramid_level", "")).strip().upper() in {"A", "B", "C"}
+        else "",
+        "display_bucket": str(raw.get("display_bucket", "")).strip()
+        if str(raw.get("display_bucket", "")).strip() in {"today", "previous_unread"}
+        else "",
+        "scoring_version": str(raw.get("scoring_version", "")).strip()[:80],
+        "policy_version": str(raw.get("policy_version", "")).strip()[:40],
         }
     )
     return normalized
@@ -1200,27 +1245,97 @@ def load_frontier_data() -> dict[str, Any]:
         "source_cache": {str(key): str(value) for key, value in source_cache.items() if str(key) and str(value)},
         "algorithm_version": _integer(payload.get("algorithm_version"), 0, 0),
         "profile_signature": str(payload.get("profile_signature", "")).strip(),
+        "fingerprints": [dict(value) for value in payload.get("fingerprints", []) if isinstance(value, dict)]
+        if isinstance(payload.get("fingerprints"), list)
+        else [],
+        "source_health": deepcopy(payload.get("source_health", {})) if isinstance(payload.get("source_health"), dict) else {},
+        "source_watermarks": deepcopy(payload.get("source_watermarks", {})) if isinstance(payload.get("source_watermarks"), dict) else {},
+        "recall_outcomes": deepcopy(payload.get("recall_outcomes", {})) if isinstance(payload.get("recall_outcomes"), dict) else {},
+        "last_batch_id": str(payload.get("last_batch_id", "")).strip(),
+        "last_success_at": str(payload.get("last_success_at", "")).strip(),
     }
 
 
 def save_frontier_data(data: dict[str, Any]) -> None:
+    _write_json(FRONTIER_FILE, frontier_storage_payload(data))
+
+
+def frontier_storage_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Return the normalized JSON object used by normal and transactional saves."""
     data = data if isinstance(data, dict) else {}
     items = data.get("items", [])
     normalized_items = [_normalize_frontier_item(item) for item in items] if isinstance(items, list) else []
     source_cache = data.get("source_cache", {})
     source_cache = source_cache if isinstance(source_cache, dict) else {}
-    _write_json(
-        FRONTIER_FILE,
-        {
+    return {
             "profile": _normalize_frontier_profile(data.get("profile")),
-            "items": [item for item in normalized_items if item is not None][:500],
+            "items": [item for item in normalized_items if item is not None],
             "last_checked": str(data.get("last_checked", "")).strip(),
             "last_notified": str(data.get("last_notified", "")).strip(),
             "source_cache": {str(key): str(value) for key, value in source_cache.items() if str(key) and str(value)},
             "algorithm_version": _integer(data.get("algorithm_version"), 0, 0),
             "profile_signature": str(data.get("profile_signature", "")).strip(),
+            "fingerprints": [dict(value) for value in data.get("fingerprints", []) if isinstance(value, dict)][-20000:]
+            if isinstance(data.get("fingerprints"), list)
+            else [],
+            "source_health": deepcopy(data.get("source_health", {})) if isinstance(data.get("source_health"), dict) else {},
+            "source_watermarks": deepcopy(data.get("source_watermarks", {})) if isinstance(data.get("source_watermarks"), dict) else {},
+            "recall_outcomes": deepcopy(data.get("recall_outcomes", {})) if isinstance(data.get("recall_outcomes"), dict) else {},
+            "last_batch_id": str(data.get("last_batch_id", "")).strip(),
+            "last_success_at": str(data.get("last_success_at", "")).strip(),
+        }
+
+
+def commit_frontier_v13_data(
+    data: dict[str, Any],
+    runtime: dict[str, Any],
+    batch_id: str,
+    *,
+    complete: bool = True,
+) -> dict[str, Any]:
+    """Atomically publish cards, fingerprints and the batch completion marker.
+
+    A partial commit keeps useful results visible while leaving the task due;
+    its next run can therefore retry only the failed sources.
+    """
+    from utils.action_transaction import apply_json_transaction
+    from utils.v13_pipeline import checkpoint, trim_batches
+
+    finalized = checkpoint(runtime, batch_id, "commit", state="success" if complete else "partial")
+    finalized = trim_batches(finalized)
+    apply_json_transaction(
+        {
+            FRONTIER_FILE: frontier_storage_payload(data),
+            V13_RUNTIME_FILE: finalized,
         },
+        action_key=batch_id,
     )
+    return finalized
+
+
+def load_v13_runtime() -> dict[str, Any]:
+    """Load the small crash-resume journal without importing pipeline code globally."""
+    from utils.v13_pipeline import trim_batches
+
+    raw = _read_json(V13_RUNTIME_FILE, {})
+    compacted = trim_batches(raw)
+    # Old releases could leave tens of megabytes of superseded stage payloads.
+    # Persist the compact representation on first use so every later task and
+    # process benefits instead of paying the parse/memory cost again.
+    try:
+        oversized = V13_RUNTIME_FILE.stat().st_size > 8 * 1024 * 1024
+    except OSError:
+        oversized = False
+    raw_batches = raw.get("batches", {}) if isinstance(raw, dict) else {}
+    if oversized or (isinstance(raw_batches, dict) and len(raw_batches) > 40):
+        _write_json(V13_RUNTIME_FILE, compacted)
+    return compacted
+
+
+def save_v13_runtime(value: dict[str, Any]) -> None:
+    from utils.v13_pipeline import trim_batches
+
+    _write_json(V13_RUNTIME_FILE, trim_batches(value))
 
 
 def record_frontier_feedback_event(
@@ -1486,6 +1601,7 @@ def _normalize_paper_files(raw: Any) -> list[dict[str, str]]:
                 "name": str(item.get("name", "")).strip() or Path(path).name or path,
                 "path": path,
                 "kind": "folder" if kind == "folder" else "file",
+                "ai_access": bool(item.get("ai_access", True)),
             }
         )
     return files
@@ -2194,31 +2310,68 @@ def create_backup(name: str | None = None, automatic: bool = False) -> Path:
         return target
     target.mkdir(parents=True, exist_ok=False)
     files: list[str] = []
+    hashes: dict[str, str] = {}
     for filename in BACKUP_FILE_NAMES:
         source = DATA_DIR / filename
         if source.exists():
             shutil.copy2(source, target / filename)
             files.append(filename)
+            hashes[filename] = hashlib.sha256((target / filename).read_bytes()).hexdigest()
+    # Settings are useful during recovery, but DPAPI tokens must never enter
+    # a portable backup.  Keep the configuration shape and clear every secret.
+    sanitized_settings = _sanitize_backup_payload(load_app_settings())
+    settings_backup = target / SETTINGS_FILE.name
+    settings_backup.write_text(json.dumps(sanitized_settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    files.append(SETTINGS_FILE.name)
+    hashes[SETTINGS_FILE.name] = hashlib.sha256(settings_backup.read_bytes()).hexdigest()
     _write_json(
         target / "manifest.json",
-        {"created_at": datetime.now().isoformat(timespec="seconds"), "automatic": automatic, "files": files},
+        {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "automatic": automatic,
+            "files": files,
+            "sha256": hashes,
+            "schema": 13,
+            "secrets_included": False,
+        },
     )
     _trim_auto_backups()
     return target
 
 
-def _trim_auto_backups(limit: int = 30) -> None:
+def _sanitize_backup_payload(value: Any, key: str = "") -> Any:
+    """Recursively clear credentials while retaining non-secret settings."""
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for child_key, child in value.items():
+            folded = str(child_key).casefold()
+            if folded.endswith("_secret") or folded in {"api_key", "secret_key", "password", "token"}:
+                result[str(child_key)] = ""
+            else:
+                result[str(child_key)] = _sanitize_backup_payload(child, str(child_key))
+        return result
+    if isinstance(value, list):
+        return [_sanitize_backup_payload(child, key) for child in value]
+    return deepcopy(value)
+
+
+def _trim_auto_backups(daily_limit: int = 7, weekly_limit: int = 4) -> None:
     if not BACKUP_DIR.exists():
         return
-    automatic = sorted((path for path in BACKUP_DIR.iterdir() if path.is_dir() and path.name.startswith("auto-")), reverse=True)
-    for path in automatic[limit:]:
+    daily = sorted((path for path in BACKUP_DIR.iterdir() if path.is_dir() and path.name.startswith("auto-")), reverse=True)
+    weekly = sorted((path for path in BACKUP_DIR.iterdir() if path.is_dir() and path.name.startswith("weekly-")), reverse=True)
+    for path in [*daily[max(1, daily_limit):], *weekly[max(1, weekly_limit):]]:
         shutil.rmtree(path, ignore_errors=True)
 
 
 def maybe_create_daily_backup(settings: dict[str, Any]) -> Path | None:
     if not bool(settings.get("auto_backup", False)):
         return None
-    return create_backup(f"auto-{date.today().isoformat()}", automatic=True)
+    today = date.today()
+    daily = create_backup(f"auto-{today.isoformat()}", automatic=True)
+    iso_year, iso_week, _weekday = today.isocalendar()
+    create_backup(f"weekly-{iso_year}-W{iso_week:02d}", automatic=True)
+    return daily
 
 
 def list_backups() -> list[dict[str, Any]]:
@@ -2254,17 +2407,49 @@ def restore_backup(name: str) -> None:
     files = manifest.get("files", [])
     if not isinstance(files, list):
         raise ValueError("Invalid backup manifest")
+    hashes = manifest.get("sha256", {}) if isinstance(manifest.get("sha256"), dict) else {}
+    for filename in files:
+        source = source_dir / str(filename)
+        if not source.is_file():
+            raise ValueError(f"备份缺少文件：{filename}")
+        expected = str(hashes.get(str(filename), ""))
+        if expected and hashlib.sha256(source.read_bytes()).hexdigest() != expected:
+            raise ValueError(f"备份完整性校验失败：{filename}")
+    # A restore is destructive by nature, so preserve the current state first.
+    create_backup(f"before-restore-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     backed_up_files = {str(filename) for filename in files if str(filename) in BACKUP_FILE_NAMES}
     for filename in BACKUP_FILE_NAMES:
         target = DATA_DIR / filename
         if filename not in backed_up_files:
-            if target.exists():
-                target.unlink()
             continue
         source = source_dir / filename
         if source.is_file():
             shutil.copy2(source, target)
+    settings_source = source_dir / SETTINGS_FILE.name
+    if settings_source.is_file():
+        restored = _read_json(settings_source, {})
+        current = load_app_settings()
+        # Restore normal preferences but retain current encrypted credentials;
+        # backups intentionally contain none.
+        restored = restored if isinstance(restored, dict) else {}
+        for section, secret_fields in {
+            "ai": ("api_key_secret",),
+            "jcr": ("api_key_secret",),
+            "easyscholar": ("secret_key_secret",),
+        }.items():
+            restored_section = restored.get(section, {}) if isinstance(restored.get(section), dict) else {}
+            current_section = current.get(section, {}) if isinstance(current.get(section), dict) else {}
+            for field in secret_fields:
+                restored_section[field] = current_section.get(field, "")
+            restored[section] = restored_section
+        restored_sources = normalize_source_settings(restored.get("data_sources"))
+        current_sources = normalize_source_settings(current.get("data_sources"))
+        for source_id in restored_sources:
+            for field in ("api_key_secret", "secret_last4"):
+                restored_sources[source_id][field] = current_sources[source_id].get(field, "")
+        restored["data_sources"] = restored_sources
+        save_app_settings(restored)
 
 
 def data_location() -> Path:

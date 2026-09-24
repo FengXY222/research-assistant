@@ -15,6 +15,8 @@ from PySide6.QtWidgets import (
     QFrame,
 )
 
+from ui.page_kit import PageHeader
+
 from utils.file_manager import (
     load_achievements,
     load_frontier_data,
@@ -258,23 +260,10 @@ class HomePage(QWidget):
         root.setContentsMargins(14, 14, 14, 12)
         root.setSpacing(8)
 
-        heading = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title_box.setSpacing(1)
-        title = QLabel("科研概览")
-        title.setObjectName("pageTitle")
-        self.date_label = QLabel()
-        self.date_label.setObjectName("dateLabel")
-        title_box.addWidget(title)
-        title_box.addWidget(self.date_label)
-        heading.addLayout(title_box)
-        heading.addStretch()
-        refresh = QPushButton("刷新")
-        refresh.setObjectName("subtleButton")
-        refresh.setToolTip("刷新首页")
-        refresh.clicked.connect(self.refresh)
-        heading.addWidget(refresh, alignment=Qt.AlignmentFlag.AlignBottom)
-        root.addLayout(heading)
+        header = PageHeader("科研概览", accent="home")
+        self.date_label = header.hint_label
+        header.add_primary_action("刷新", self.refresh, tooltip="刷新首页")
+        root.addWidget(header)
 
         # HOME deliberately owns its own scroll canvas.  In widget mode this
         # keeps the main work surfaces legible instead of compressing every

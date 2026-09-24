@@ -49,6 +49,14 @@ def _identity(name: str, issn: str, publisher: str = "Elsevier", active: bool = 
         "conflicts": [],
         "missing": [],
         "reason": "ok" if active else "停止出版",
+        "scope": "Soil carbon mapping, soil observations, regional modelling and environmental prediction.",
+        "accepted_article_types": ["research article"],
+        "positioning": "Publishes original soil carbon mapping methods.",
+        "jcr": {"status": "verified", "metrics": [{"quartile": "Q2"}]},
+        "decision_days": 90,
+        "fee_mode": "hybrid",
+        "recent_papers": [{"title": "Regional soil carbon mapping"}],
+        "data_policy": "Data availability statement required",
     }
 
 
@@ -78,6 +86,9 @@ def _run_fixture(
         for index, identity in enumerate(identities.values())
     ]
     monkeypatch.setattr(service, "find_similar_works", lambda *args, **kwargs: works)
+    # This unit suite isolates similar-paper discovery.  v13 separately tests
+    # the full local journal-library recall lane.
+    monkeypatch.setattr(service, "_journal_library_recall", lambda: [])
 
     def verify(candidate, *, cache):
         return identities[str(candidate.get("name", ""))]
@@ -109,7 +120,18 @@ def _run_fixture(
     cache = EvidenceCache(tmp_path / "evidence.sqlite")
     cache.initialize()
     return run_selection_rounds(
-        {"id": "paper-1", "title": "Soil carbon mapping", "keywords": ["soil carbon"], "summary": "mapping"},
+        {
+            "id": "paper-1",
+            "title": "Soil carbon mapping",
+            "keywords": ["soil carbon"],
+            "summary": "Regional soil carbon mapping from soil observations.",
+            "research_object": ["soil carbon", "soil"],
+            "methods": ["mapping"],
+            "data": "soil observations",
+            "scale": "regional",
+            "article_type": "research article",
+            "innovation": "new mapping method",
+        },
         requirements or {},
         rejected or [],
         cache=cache,
@@ -135,7 +157,7 @@ def test_rejected_name_and_issn_aliases_are_hard_eliminations(tmp_path: Path, mo
     assert result["rejected_counts"]["previously_rejected"] == 2
 
 
-def test_inactive_or_unverified_identity_never_enters_results(tmp_path: Path, monkeypatch) -> None:
+def test_inactive_is_excluded_but_unverified_identity_is_retained_pending(tmp_path: Path, monkeypatch) -> None:
     inactive = _identity("Former Journal", "1111-2222", active=False)
     unknown = _identity("Unknown Journal", "3333-4444")
     unknown.update({"verified": False, "missing": ["官方主页"], "official_url": ""})
@@ -146,8 +168,9 @@ def test_inactive_or_unverified_identity_never_enters_results(tmp_path: Path, mo
         identities={"Former Journal": inactive, "Unknown Journal": unknown},
     )
 
-    assert result["results"] == []
-    assert result["rejected_counts"]["identity_or_inactive"] == 2
+    assert [item["journal_name"] for item in result["results"]] == ["Unknown Journal"]
+    assert result["results"][0]["journal"]["identity_status"] == "pending_verification"
+    assert result["rejected_counts"]["identity_or_inactive"] == 1
 
 
 def test_selected_publisher_is_a_hard_gate(tmp_path: Path, monkeypatch) -> None:
@@ -165,7 +188,7 @@ def test_selected_publisher_is_a_hard_gate(tmp_path: Path, monkeypatch) -> None:
     assert result["rejected_counts"]["publisher"] == 1
 
 
-def test_configured_divisions_are_hard_and_unknown_fails(tmp_path: Path, monkeypatch) -> None:
+def test_configured_divisions_are_a_strict_hard_gate_including_unknowns(tmp_path: Path, monkeypatch) -> None:
     patches = {
         "Q1 Journal": {
             **_identity("Q1 Journal", "1111-2222"),
@@ -195,7 +218,7 @@ def test_configured_divisions_are_hard_and_unknown_fails(tmp_path: Path, monkeyp
     assert result["rejected_counts"]["division"] == 2
 
 
-def test_unconfigured_easyscholar_skips_all_division_elimination(tmp_path: Path, monkeypatch) -> None:
+def test_explicit_division_constraint_does_not_silently_pass_when_verifier_is_unconfigured(tmp_path: Path, monkeypatch) -> None:
     result = _run_fixture(
         tmp_path,
         monkeypatch,
@@ -204,7 +227,32 @@ def test_unconfigured_easyscholar_skips_all_division_elimination(tmp_path: Path,
         easyscholar_ready=False,
     )
 
-    assert [item["journal_name"] for item in result["results"]] == ["Unknown Journal"]
+    assert result["results"] == []
+    assert result["rejected_counts"]["division"] == 1
+
+
+def test_confirmed_jcr_q3_q4_are_excluded_without_a_legacy_toggle(tmp_path: Path, monkeypatch) -> None:
+    patches = {
+        "Q2 Journal": {
+            **_identity("Q2 Journal", "1111-2222"),
+            "name": "Q2 Journal",
+            "jcr": {"status": "verified", "metrics": [{"quartile": "Q2"}]},
+        },
+        "Q3 Journal": {
+            **_identity("Q3 Journal", "3333-4444"),
+            "name": "Q3 Journal",
+            "jcr": {"status": "verified", "metrics": [{"quartile": "Q3"}]},
+        },
+    }
+    result = _run_fixture(
+        tmp_path,
+        monkeypatch,
+        identities={name: _identity(name, patch["issns"][0]) for name, patch in patches.items()},
+        division_patches=patches,
+    )
+
+    assert [item["journal_name"] for item in result["results"]] == ["Q2 Journal"]
+    assert result["rejected_counts"]["division"] == 1
 
 
 def test_fee_and_speed_rank_but_never_eliminate_and_hybrid_matches_both(
@@ -232,17 +280,68 @@ def test_fee_and_speed_rank_but_never_eliminate_and_hybrid_matches_both(
     assert set(result["results"][0]["fee_matches"]) == {"no_fee", "paid"}
 
 
-def test_topic_threshold_is_a_hard_gate(tmp_path: Path, monkeypatch) -> None:
+def test_topic_threshold_no_longer_hard_deletes_a_candidate(tmp_path: Path, monkeypatch) -> None:
+    weak = _identity("Weak Fit", "1111-2222")
+    weak.update(
+        {
+            "scope": "Clinical medicine and hospital interventions.",
+            "accepted_article_types": [],
+            "positioning": "",
+            "jcr": {},
+            "decision_days": "",
+            "fee_mode": "unknown",
+            "recent_papers": [],
+            "data_policy": "",
+        }
+    )
     result = _run_fixture(
         tmp_path,
         monkeypatch,
-        identities={"Weak Fit": _identity("Weak Fit", "1111-2222")},
+        identities={"Weak Fit": weak},
         requirements={"fit_strictness": "balanced"},
         assessments={"Weak Fit": {"fit_score": 64, "reason_cn": "略相关"}},
     )
 
     assert result["results"] == []
-    assert result["rejected_counts"]["topic_fit"] == 1
+    assert [item["journal_name"] for item in result["retained_candidates"]] == ["Weak Fit"]
+    assert result["retained_candidates"][0]["candidate_state"] == "retained_unshown"
+    assert result["retained_candidates"][0]["display_reason"] == "below_dynamic_pyramid"
+
+
+def test_ai_assessment_is_chunked_and_one_failed_batch_does_not_cancel_the_rest(monkeypatch) -> None:
+    from utils import journal_selection_service as service
+
+    journals = [
+        {
+            "id": f"journal-{index}",
+            "name": f"Journal {index}",
+            "identity_evidence": {"verified": True},
+        }
+        for index in range(12)
+    ]
+    calls: list[list[str]] = []
+
+    def assess(_manuscript, batch, _requirements, progress=None):
+        del progress
+        ids = [value["id"] for value in batch]
+        calls.append(ids)
+        if len(calls) == 2:
+            raise RuntimeError("output truncated")
+        return {value: {"reason_cn": "ok"} for value in ids}
+
+    monkeypatch.setattr(service, "_assess_verified_journals_with_ai", assess)
+    assessments, errors = service._assess_verified_journals_in_batches(
+        {"title": "Paper"},
+        journals,
+        {},
+        emit=lambda *_args: None,
+    )
+
+    assert [len(value) for value in calls] == [5, 5, 2]
+    assert len(assessments) == 7
+    assert errors == [
+        {"start": 6, "end": 10, "error_type": "RuntimeError", "error": "output truncated"}
+    ]
 
 
 def test_two_consecutive_no_growth_rounds_stop_the_search(tmp_path: Path, monkeypatch) -> None:

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.dialogs import confirm_delete, show_undo_toast
+from ui.page_kit import PageHeader
 from ui.reorder import OrderDragHandle, ReorderableColumn
 from utils.file_manager import ACHIEVEMENT_CATEGORIES, load_achievements, save_achievements
 
@@ -344,27 +345,11 @@ class AchievementsPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 12)
         root.setSpacing(8)
-        heading = QHBoxLayout()
-        title_box = QVBoxLayout()
-        title_box.setSpacing(1)
-        title = QLabel("成果")
-        title.setObjectName("paperPageTitle")
-        subtitle = QLabel("论文、专利、奖项与其他成果；投稿接收或发表后会自动归入这里")
-        subtitle.setObjectName("dateLabel")
-        subtitle.setWordWrap(True)
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-        heading.addLayout(title_box, 1)
-        update_profile = QPushButton("↻ 更新研究画像")
-        update_profile.setObjectName("subtleButton")
-        update_profile.setToolTip("按成果、关联 PDF 与每日前沿偏好增量更新；无变化时不会调用 DeepSeek")
-        update_profile.clicked.connect(self.profile_update_requested.emit)
-        heading.addWidget(update_profile, alignment=Qt.AlignmentFlag.AlignTop)
-        add = QPushButton("＋ 新增成果")
-        add.setObjectName("primaryButton")
-        add.clicked.connect(self._add)
-        heading.addWidget(add, alignment=Qt.AlignmentFlag.AlignTop)
-        root.addLayout(heading)
+        header = PageHeader("成果", accent="achievements")
+        header.add_primary_action("＋ 新增成果", self._add)
+        menu = header.add_overflow_menu("成果更多操作")
+        menu.add_action("更新研究画像", self.profile_update_requested.emit)
+        root.addWidget(header)
         controls = QHBoxLayout()
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("搜索成果名称、载体或编号")

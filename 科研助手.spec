@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_dynamic_libs
 
-datas = [('assets/fonts/NotoSansCJKsc-Regular.otf', 'assets/fonts'), ('assets/translation/opus-mt-en-zh', 'assets/translation/opus-mt-en-zh')]
+datas = [('assets/fonts/NotoSansCJKsc-Regular.otf', 'assets/fonts'), ('assets/icons/lucide', 'assets/icons/lucide'), ('assets/translation/opus-mt-en-zh', 'assets/translation/opus-mt-en-zh')]
 binaries = []
 datas += collect_data_files('rapidocr')
 binaries += collect_dynamic_libs('ctranslate2')

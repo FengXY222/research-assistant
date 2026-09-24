@@ -1,0 +1,6 @@
+# 开发、测试与打包环境；正式运行仅需 requirements.txt。
+-r requirements.txt
+
+pytest>=8,<10
+pyinstaller>=6,<7
+python-docx>=1,<2

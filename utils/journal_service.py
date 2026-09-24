@@ -9,13 +9,15 @@ from difflib import SequenceMatcher
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from utils.api_rate_limit import rate_limited_urlopen as urlopen
 
 from utils.publisher_utils import fuzzy_publisher_check
 
 
 CROSSREF_API = "https://api.crossref.org"
-USER_AGENT = "ResearchAssistant/0.6 (personal desktop research tool)"
+USER_AGENT = "ResearchAssistant/13.0 (personal desktop research tool)"
 
 
 class JournalLookupError(RuntimeError):

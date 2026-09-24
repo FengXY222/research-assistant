@@ -22,12 +22,12 @@ STABLE_FORMAL_DATA = Path(os.environ["LOCALAPPDATA"]) / APP_NAME / "UserData"
 
 class ReleaseIdentityV12Tests(TestCase):
     def test_every_release_identity_declares_v12(self) -> None:
-        self.assertEqual(APP_VERSION, "12.2.1")
+        self.assertEqual(APP_VERSION, "13.1.2")
         self.assertEqual(MIN_SUPPORTED_DATA_VERSION, "10.0")
         self.assertIn(f'#define MyAppVersion "{APP_VERSION}"', ISS.read_text(encoding="utf-8"))
         self.assertIn(f'$appVersion = "{APP_VERSION}"', BUILD.read_text(encoding="utf-8"))
         version_info = VERSION_INFO.read_text(encoding="utf-8")
-        self.assertIn("filevers=(12, 2, 1, 0)", version_info)
+        self.assertIn("filevers=(13, 1, 2, 0)", version_info)
         self.assertIn(APP_NAME, version_info)
 
     def test_installer_keeps_existing_data_when_upgrading_in_place(self) -> None:
@@ -59,13 +59,16 @@ class ReleaseIdentityV12Tests(TestCase):
         requirements = (PROJECT / "requirements.txt").read_text(encoding="utf-8")
 
         self.assertIn('$buildEnvironment = Join-Path $PSScriptRoot ".build-venv"', build)
-        self.assertIn("-m venv $buildEnvironment", build)
+        self.assertIn('$venvArguments = @("-m", "venv")', build)
+        self.assertIn('$venvArguments += "--upgrade"', build)
+        self.assertIn("& $basePythonPath @venvArguments", build)
         self.assertIn('"--collect-data", "rapidocr"', build)
         for module in ("rapidocr.main", "onnxruntime", "pypdfium2"):
             self.assertIn(f'"--hidden-import", "{module}"', build)
         self.assertIn('"--collect-binaries", "ctranslate2"', build)
         self.assertIn('"--hidden-import", "sentencepiece"', build)
         self.assertGreaterEqual(build.count("$bundledTranslationData"), 2)
+        self.assertGreaterEqual(build.count("$bundledIconData"), 2)
         self.assertIn("pywin32", requirements)
         unused_modules = (
             "torch",

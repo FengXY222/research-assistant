@@ -57,7 +57,7 @@ class AiFirstSelectionV111Tests(TestCase):
         self.assertEqual(requirements["oa_mode"], "require")
         self.assertEqual(requirements["quartile_target"], "q1_q2")
         self.assertEqual(requirements["speed_priority"], "urgent")
-        self.assertTrue(requirements["filter_known_q3_q4"])
+        self.assertFalse(requirements["filter_known_q3_q4"])
 
     def test_ai_fit_is_the_main_score_and_external_candidates_remain_explicitly_unverified(self) -> None:
         self.assertTrue(callable(rank_ai_first_candidates))

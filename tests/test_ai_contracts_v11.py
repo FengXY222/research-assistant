@@ -111,7 +111,7 @@ class AiContractsTests(TestCase):
         self.assertEqual(captured["requirements"]["speed_priority"], "urgent")
         self.assertEqual(result["ranked"][0]["fit_score"], 90)
 
-    def test_ai_first_selection_requests_five_distinct_rows_and_appends_verified_local_fallbacks(self) -> None:
+    def test_ai_first_selection_has_no_count_quota_and_keeps_verified_local_candidates(self) -> None:
         captured: dict = {}
 
         def fake_chat(_config, _key, system, payload, _limit):
@@ -133,11 +133,11 @@ class AiContractsTests(TestCase):
                 {"publishers": ["Elsevier"], "jcr_quartiles": ["Q1"], "fee_modes": ["no_fee"]},
             )
 
-        self.assertIn("至少 5", captured["task"])
+        self.assertIn("不设置数量目标", captured["task"])
         self.assertEqual(captured["requirements"]["publishers"], ["Elsevier"])
         self.assertEqual(captured["requirements"]["jcr_quartiles"], ["Q1"])
         self.assertEqual([item["id"] for item in result["ranked"]], ["catena", "soil"])
-        self.assertTrue(result["fallback_reason_cn"])
+        self.assertFalse(result["fallback_reason_cn"])
 
     def test_ai_first_selection_drops_provider_rows_with_known_wrong_publisher(self) -> None:
         journals = [
@@ -166,19 +166,23 @@ class AiContractsTests(TestCase):
             )
 
         self.assertEqual([item["id"] for item in result["ranked"]], ["elsevier"])
-        self.assertTrue(result["fallback_reason_cn"])
+        self.assertFalse(result["fallback_reason_cn"])
 
-    def test_frontier_ai_rerank_returns_bounded_adjustment_not_replacement_score(self) -> None:
+    def test_frontier_ai_rerank_returns_two_bounded_axis_adjustments(self) -> None:
         with patch("utils.ai_service._require_config", return_value=({"model": "deepseek-test"}, "key")), patch(
             "utils.ai_service._chat_json",
-            return_value={"ranked": [{"id": "frontier-1", "adjustment": -30, "summary_cn": "中文速览", "reason_cn": "方法偏离"}]},
+            return_value={"ranked": [{"id": "frontier-1", "axes": {
+                "relevance": {"adjustment": 30, "confidence": "high", "reason": "主题匹配", "evidence_refs": ["title"]},
+                "value": {"adjustment": 22, "confidence": "medium", "reason": "期刊证据可用", "evidence_refs": ["journal"]},
+            }, "summary_cn": "中文速览"}]},
         ):
             result = rerank_frontier_with_ai(
                 {"terms": [{"text": "SOC", "weight": 100, "locked": True}]},
                 [{"id": "frontier-1", "title": "SOC paper", "journal": "CATENA", "score": 120}],
             )
 
-        self.assertEqual(result["ranked"][0]["adjustment"], -15)
+        self.assertEqual(result["ranked"][0]["ai_axis_payload"]["axes"]["relevance"]["adjustment"], 30)
+        self.assertEqual(result["ranked"][0]["ai_axis_payload"]["axes"]["value"]["adjustment"], 22)
         self.assertNotIn("score", result["ranked"][0])
 
     def test_v12_fit_assessment_only_scores_verified_stable_ids(self) -> None:
@@ -191,10 +195,10 @@ class AiContractsTests(TestCase):
                 "assessments": [
                     {
                         "id": "issn:0341-8162",
-                        "fit_score": 84,
-                        "reason_cn": "研究对象与空间制图方法契合",
-                        "estimated_decision_days_min": 35,
-                        "estimated_decision_days_max": 70,
+                        "axes": {
+                            "fit": {"adjustment": 30, "confidence": "high", "reason": "研究对象与空间制图方法契合", "evidence_refs": ["paper_abstract", "journal_scope"]},
+                            "strategy": {"adjustment": 20, "confidence": "medium", "reason": "投稿目标匹配", "evidence_refs": ["journal_facts"]},
+                        },
                     },
                     {"id": "invented", "fit_score": 99, "reason_cn": "不得进入"},
                 ]
@@ -221,7 +225,8 @@ class AiContractsTests(TestCase):
             )
 
         self.assertEqual(set(result), {"issn:0341-8162"})
-        self.assertEqual(result["issn:0341-8162"]["fit_score"], 84)
+        self.assertIsNone(result["issn:0341-8162"]["fit_score"])
+        self.assertEqual(result["issn:0341-8162"]["ai_axis_payload"]["axes"]["fit"]["adjustment"], 30)
         self.assertIn("不能新增", captured["system"])
         self.assertEqual(progress[0][1], 10)
         self.assertEqual(progress[-1][1], 100)

@@ -1,4 +1,4 @@
-"""Build the v12 Word reference guide from the maintained Markdown manual."""
+"""Build the current Word reference guide from the maintained Markdown manual."""
 
 from __future__ import annotations
 
@@ -346,7 +346,7 @@ def render_markdown(document: Document, markdown: str) -> None:
 
 def build_manual(output: Path, source: Path = SOURCE) -> None:
     if not source.is_file():
-        raise FileNotFoundError(f"找不到 v11 使用说明源文件：{source}")
+        raise FileNotFoundError(f"找不到当前版本使用说明源文件：{source}")
     output.parent.mkdir(parents=True, exist_ok=True)
     document = Document()
     configure_styles(document)

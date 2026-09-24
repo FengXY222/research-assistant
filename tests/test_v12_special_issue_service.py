@@ -279,6 +279,24 @@ def test_refresh_pipeline_discovers_verifies_enriches_and_matches_without_persis
             "matched_terms": ["soil organic carbon"],
             "paper_matches": [],
             "model": "fixture",
+            "ai_axis_payload": {
+                "provider": "fixture",
+                "model": "fixture",
+                "axes": {
+                    "relevance": {
+                        "adjustment": 28,
+                        "confidence": "high",
+                        "reason": "方向与征稿范围高度匹配",
+                        "evidence_refs": ["title", "scope_text"],
+                    },
+                    "opportunity": {
+                        "adjustment": 24,
+                        "confidence": "medium",
+                        "reason": "征稿信息完整且可执行",
+                        "evidence_refs": ["journal", "source_evidence"],
+                    },
+                },
+            },
         }
 
     cache = EvidenceCache(tmp_path / "pipeline.sqlite")
@@ -297,10 +315,22 @@ def test_refresh_pipeline_discovers_verifies_enriches_and_matches_without_persis
         persist=False,
     )
 
-    assert result["stats"] == {"raw": 1, "discovered": 1, "items": 1, "eligible": 1}
+    from utils.special_issue_policy import evaluate_special_issue
+
+    assert result["stats"]["raw"] == 1
+    assert result["stats"]["discovered"] == 1
+    assert result["stats"]["items"] == 1
+    expected_visible = int(
+        evaluate_special_issue(
+            result["store"]["items"][0], now=datetime(2026, 8, 31, 12), view="recommended"
+        )["visible"]
+    )
+    assert result["stats"]["eligible"] == expected_visible
     assert result["store"]["items"][0]["match"]["score"] == 86
     assert result["store"]["items"][0]["match"]["formal"]
-    assert result["notifications"][0]["kind"] == "new_high_match"
+    # v13 notifications require the visible dual-axis hard gate; a legacy
+    # scalar AI score alone is no longer enough to notify.
+    assert result["notifications"] == []
 
     def must_not_run(*_args):
         raise AssertionError("unchanged scope/profile should reuse the previous AI score")

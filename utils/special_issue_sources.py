@@ -6,14 +6,16 @@ import json
 import re
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from html.parser import HTMLParser
-from functools import wraps
+from functools import lru_cache, wraps
 from threading import Lock
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from utils.api_rate_limit import rate_limited_urlopen as urlopen
 
 
 Fetcher = Callable[[str], str]
@@ -27,7 +29,7 @@ def _request_text(url: str) -> str:
         headers={
             "Accept": "text/html,application/ld+json,application/json;q=0.9,*/*;q=0.5",
             "Accept-Language": "en-US,en;q=0.8",
-            "User-Agent": "ResearchAssistant/12.1 (public call-for-papers discovery)",
+            "User-Agent": "ResearchAssistant/13.0 (public call-for-papers discovery)",
         },
     )
     with urlopen(request, timeout=20) as response:  # noqa: S310 - fixed public publisher URLs
@@ -277,6 +279,19 @@ def _expanded_discovery_queries(keywords: list[str] | None, *, limit: int = 6) -
     return result
 
 
+@lru_cache(maxsize=64)
+def _normalized_keyword_patterns(keywords: tuple[str, ...]) -> tuple[tuple[str, frozenset[str]], ...]:
+    """Compile a profile's discovery terms once for large CFP shards."""
+
+    result: list[tuple[str, frozenset[str]]] = []
+    for raw in keywords:
+        phrase = " ".join(re.sub(r"[^a-z0-9]+", " ", raw.casefold()).split())
+        if not phrase:
+            continue
+        result.append((phrase, frozenset(token for token in phrase.split() if len(token) >= 3)))
+    return tuple(result)
+
+
 def _keyword_relevance(row: dict[str, Any], keywords: list[str] | None) -> int:
     haystack = " ".join(
         str(row.get(field, "")) for field in ("title", "scope_text", "journal")
@@ -285,13 +300,10 @@ def _keyword_relevance(row: dict[str, Any], keywords: list[str] | None) -> int:
     canonical_tokens = set(canonical.split())
     padded_canonical = f" {canonical} "
     score = 0
-    for raw in keywords or []:
-        phrase = " ".join(re.sub(r"[^a-z0-9]+", " ", str(raw).casefold()).split())
-        if not phrase:
-            continue
+    patterns = _normalized_keyword_patterns(tuple(str(raw) for raw in (keywords or [])))
+    for phrase, tokens in patterns:
         if f" {phrase} " in padded_canonical:
             score += 12
-        tokens = {token for token in phrase.split() if len(token) >= 3}
         score += sum(2 for token in tokens if token in canonical_tokens)
     return score
 
@@ -304,19 +316,23 @@ def _rank_relevant(
     exploratory: int = 0,
     minimum_score: int = 1,
 ) -> list[dict[str, Any]]:
-    ranked = sorted(
-        rows,
-        key=lambda row: (
-            -_keyword_relevance(row, keywords),
-            str(row.get("deadline", "9999-99-99")),
-            str(row.get("title", "")).casefold(),
-        ),
+    scored = [(_keyword_relevance(row, keywords), row) for row in rows]
+    scored.sort(
+        key=lambda value: (
+            -value[0],
+            str(value[1].get("deadline", "9999-99-99")),
+            str(value[1].get("title", "")).casefold(),
+        )
     )
+    ranked = [row for _score, row in scored]
     if not keywords:
-        return ranked[:limit]
-    relevant = [row for row in ranked if _keyword_relevance(row, keywords) >= minimum_score]
-    unrelated = [row for row in ranked if _keyword_relevance(row, keywords) < minimum_score]
-    return [*relevant[:limit], *unrelated[: max(0, exploratory)]][: limit + max(0, exploratory)]
+        return ranked if limit <= 0 else ranked[:limit]
+    relevant = [row for score, row in scored if score >= minimum_score]
+    unrelated = [row for score, row in scored if score < minimum_score]
+    selected_relevant = relevant if limit <= 0 else relevant[:limit]
+    selected_unrelated = unrelated[: max(0, exploratory)]
+    values = [*selected_relevant, *selected_unrelated]
+    return values if limit <= 0 else values[: limit + max(0, exploratory)]
 
 
 def _nested_name(value: Any) -> str:
@@ -576,7 +592,7 @@ class FrontiersResearchTopicsSource(_BaseSource):
             topics = self._listing_topics(text)
             topics.sort(key=lambda value: (-self._keyword_score(value[1], keywords), value[1].casefold()))
             positive = [value for value in topics if self._keyword_score(value[1], keywords) > 0]
-            chosen = (positive[:10] if positive else topics[:5])
+            chosen = positive if positive else topics
             selected.extend((detail_url, title, url) for detail_url, title in chosen)
         if direct:
             return self._dedupe(direct)
@@ -658,63 +674,69 @@ class ElsevierCallsSource(_BaseSource):
 
     @staticmethod
     def _reader_records(text: str, official_url: str) -> list[dict[str, Any]]:
-        lines = [_clean_html(line) for line in str(text or "").splitlines()]
-        lines = [line for line in lines if line]
+        raw_lines = [str(line).strip() for line in str(text or "").splitlines() if str(line).strip()]
+        lines = [(raw, _clean_html(raw)) for raw in raw_lines if _clean_html(raw)]
         start = next(
-            (index + 1 for index, line in enumerate(lines) if re.match(r"Browse\s+\d+\s+calls for papers", line, re.I)),
+            (index + 1 for index, (_raw, line) in enumerate(lines) if re.match(r"Browse\s+\d+\s+calls for papers", line, re.I)),
             0,
         )
         rows: list[dict[str, Any]] = []
-        block: list[str] = []
+        block: list[tuple[str, str]] = []
         deadline_pattern = re.compile(r"Submission deadline\s*[:：]\s*(.+)$", re.I)
         controls = re.compile(
             r"^(?:filter|refine|select|all subject|all secondary|selected$|skip to|journals? & books|help$|search$|my account|sign in)",
             re.I,
         )
-        for line in lines[start:]:
+        for raw_line, line in lines[start:]:
             deadline_match = deadline_pattern.search(line)
             if not deadline_match:
-                block.append(line)
+                block.append((raw_line, line))
                 continue
             deadline = deadline_match.group(1).strip()
-            candidates = [value for value in block if not controls.search(value)]
-            metric_index = next(
+            candidates = [(raw, value) for raw, value in block[-24:] if not controls.search(value)]
+            metric_indexes = [
+                index
+                for index, (_raw, value) in enumerate(candidates)
+                if re.search(r"(?:•|[-–—])\s*(?:Impact Factor|CiteScore)\b", value, re.I)
+            ]
+            metric_index = metric_indexes[-1] if metric_indexes else -1
+            previous_metric = next((value for value in reversed(metric_indexes[:-1]) if value < metric_index), -1)
+            title_index = next(
                 (
                     index
-                    for index, value in enumerate(candidates)
-                    if re.search(r"(?:•|[-–—])\s*(?:Impact Factor|CiteScore)\b", value, re.I)
+                    for index in range(metric_index - 1, previous_metric, -1)
+                    if not re.match(r"Guest editors?\s*[:：]", candidates[index][1], re.I)
+                    and not re.search(r"(?:Impact Factor|CiteScore)\b", candidates[index][1], re.I)
+                    and len(candidates[index][1]) >= 12
                 ),
                 -1,
-            )
-            title = next(
-                (
-                    value
-                    for value in candidates
-                    if not re.match(r"Guest editors?\s*[:：]", value, re.I)
-                    and not re.search(r"(?:Impact Factor|CiteScore)\b", value, re.I)
-                ),
-                "",
-            )
+            ) if metric_index > 0 else -1
+            title = candidates[title_index][1] if title_index >= 0 else ""
+            detail_url = ""
+            if title_index >= 0:
+                markdown_link = re.search(r"\[([^\]]+)\]\((https?://[^)]+|/[^)]+)\)", candidates[title_index][0])
+                if markdown_link:
+                    title = _clean_html(markdown_link.group(1))
+                    detail_url = _safe_url(markdown_link.group(2), official_url)
             journal = ""
             if metric_index >= 0:
                 journal = re.split(
                     r"\s*(?:•|[-–—])\s*(?=(?:Impact Factor|CiteScore)\b)",
-                    candidates[metric_index],
+                    candidates[metric_index][1],
                     maxsplit=1,
                     flags=re.I,
                 )[0].strip()
             if title and journal:
                 scope_lines = [
                     value
-                    for value in candidates
-                    if value not in {title, candidates[metric_index]}
-                    and not re.match(r"Guest editors?\s*[:：]", value, re.I)
+                    for _raw, value in candidates[title_index + 1 : metric_index]
+                    if not re.match(r"Guest editors?\s*[:：]", value, re.I)
                 ]
                 rows.append(
                     {
                         "title": title,
                         "deadline": deadline,
-                        "official_url": official_url,
+                        "official_url": detail_url,
                         "discovery_url": ElsevierCallsSource.reader_url,
                         "scope_text": " ".join(scope_lines),
                         "journal": journal,
@@ -740,7 +762,7 @@ class ElsevierCallsSource(_BaseSource):
             progress("正在读取 Elsevier 征稿目录…", 15)
         pending = [official_url]
         visited: set[str] = set()
-        while pending and len(visited) < 6:
+        while pending:
             current_url = pending.pop(0)
             if current_url in visited:
                 continue
@@ -763,8 +785,21 @@ class ElsevierCallsSource(_BaseSource):
                 elif next_url:
                     self._record_error(next_url, "pagination", "Cross-origin pagination link was not followed")
         if rows:
-            return self._dedupe(_rank_relevant(rows, keywords, limit=18))
-        return []
+            return self._dedupe(_rank_relevant(rows, keywords, limit=0))
+        if progress:
+            progress("Elsevier 官网入口暂未返回可解析目录，正在启用只读备用入口…", 70)
+        try:
+            reader_text = self._fetcher(self.reader_url)
+        except Exception as error:
+            if progress:
+                progress(f"Elsevier 备用入口暂不可用，已继续：{error}", 0)
+            return []
+        fallback = self._reader_records(reader_text, official_url)
+        if not fallback:
+            self._record_error(self.reader_url, "parse", "Elsevier reader did not contain recognizable call records")
+            return []
+        decorated = self._decorate(fallback, self.reader_url, reader_text)
+        return self._dedupe(_rank_relevant(decorated, keywords, limit=0))
 
 
 class SpringerCollectionsSource(_BaseSource):
@@ -783,7 +818,7 @@ class SpringerCollectionsSource(_BaseSource):
         source_names: dict[str, str] = {}
 
         def fetch_groups(query: str) -> Any:
-            url = f"{self.openalex_api}/works?{urlencode({'search': query, 'group_by': 'primary_location.source.id', 'per-page': 40})}"
+            url = f"{self.openalex_api}/works?{urlencode({'search': query, 'group_by': 'primary_location.source.id', 'per-page': 200})}"
             payload = _json_document(self._fetcher(url))
             if not isinstance(payload, dict) or not isinstance(payload.get("group_by"), list):
                 self._record_error(url, "parse", "OpenAlex grouping response is invalid")
@@ -812,13 +847,20 @@ class SpringerCollectionsSource(_BaseSource):
                     continue
                 source_counts[source_id] = source_counts.get(source_id, 0) + int(group.get("count", 0) or 0)
                 source_names[source_id] = name
-        source_ids = sorted(source_counts, key=lambda value: (-source_counts[value], source_names.get(value, "").casefold()))[:50]
+        source_ids = sorted(source_counts, key=lambda value: (-source_counts[value], source_names.get(value, "").casefold()))
         if not source_ids:
             return []
-        filter_value = "openalex_id:" + "|".join(source_ids)
-        url = f"{self.openalex_api}/sources?{urlencode({'filter': filter_value, 'per-page': 50})}"
-        payload = _json_document(self._fetcher(url))
-        rows = payload.get("results", []) if isinstance(payload, dict) else []
+        rows: list[Any] = []
+        # OpenAlex OR filters can exceed common URL limits when the topic
+        # search returns many journals.  Chunk transport only; do not truncate
+        # the candidate set.
+        for offset in range(0, len(source_ids), 40):
+            chunk = source_ids[offset : offset + 40]
+            filter_value = "openalex_id:" + "|".join(chunk)
+            url = f"{self.openalex_api}/sources?{urlencode({'filter': filter_value, 'per-page': 40})}"
+            payload = _json_document(self._fetcher(url))
+            if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                rows.extend(payload["results"])
         result: list[dict[str, Any]] = []
         for raw in rows if isinstance(rows, list) else []:
             if not isinstance(raw, dict) or str(raw.get("type", "")).casefold() != "journal":
@@ -833,7 +875,7 @@ class SpringerCollectionsSource(_BaseSource):
             row["topic_count"] = source_counts.get(source_id, 0)
             result.append(row)
         result.sort(key=lambda row: (-int(row.get("topic_count", 0) or 0), str(row.get("display_name", "")).casefold()))
-        return result[:10]
+        return result
 
     @staticmethod
     def _route(journal: dict[str, Any]) -> tuple[str, str] | None:
@@ -999,7 +1041,7 @@ class SpringerCollectionsSource(_BaseSource):
                 except Exception:
                     continue
                 seeds.extend(self._listing_records(listing, listing_url, journal, route_kind))
-        seeds = _rank_relevant(self._dedupe(seeds), keywords, limit=10)
+        seeds = _rank_relevant(self._dedupe(seeds), keywords, limit=0)
         rows: list[dict[str, Any]] = []
 
         def fetch_detail(seed: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -1028,7 +1070,224 @@ class SpringerCollectionsSource(_BaseSource):
 class WileyCallsSource(_BaseSource):
     source_id = "wiley"
     publisher = "Wiley"
-    urls = ("https://onlinelibrary.wiley.com/call-for-papers",)
+    urls: tuple[str, ...] = ()
+
+    openalex_api = "https://api.openalex.org"
+    # This is a discovery batch size, not a recommendation quota.  OpenAlex
+    # can return hundreds of journals for a broad research profile; probing
+    # every legacy CFP path serially made one failed Wiley run take hours.
+    journal_candidate_limit = 40
+    journal_batch_limit = 12
+    route_limit = 2
+    consecutive_failure_limit = 2
+
+    def _openalex_journals(self, keywords: list[str] | None) -> list[dict[str, Any]]:
+        """Locate topic-relevant Wiley journals before visiting their CFP pages."""
+
+        queries = _discovery_queries(keywords, limit=4)
+        if not queries:
+            return []
+        source_counts: dict[str, int] = {}
+        source_names: dict[str, str] = {}
+        for query in queries:
+            url = f"{self.openalex_api}/works?{urlencode({'search': query, 'group_by': 'primary_location.source.id', 'per-page': 200})}"
+            payload = _json_document(self._fetcher(url))
+            if not isinstance(payload, dict) or not isinstance(payload.get("group_by"), list):
+                self._record_error(url, "parse", "OpenAlex grouping response is invalid")
+                continue
+            for group in payload["group_by"]:
+                if not isinstance(group, dict):
+                    continue
+                source_id = str(group.get("key", "")).rsplit("/", 1)[-1]
+                name = str(group.get("key_display_name", "")).strip()
+                if not re.fullmatch(r"S\d+", source_id):
+                    continue
+                source_counts[source_id] = source_counts.get(source_id, 0) + int(group.get("count", 0) or 0)
+                source_names[source_id] = name
+        source_ids = sorted(source_counts, key=lambda value: (-source_counts[value], source_names.get(value, "").casefold()))
+        source_ids = source_ids[: self.journal_candidate_limit]
+        rows: list[Any] = []
+        for offset in range(0, len(source_ids), 40):
+            chunk = source_ids[offset : offset + 40]
+            url = f"{self.openalex_api}/sources?{urlencode({'filter': 'openalex_id:' + '|'.join(chunk), 'per-page': 40})}"
+            payload = _json_document(self._fetcher(url))
+            if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+                rows.extend(payload["results"])
+            else:
+                self._record_error(url, "parse", "OpenAlex source response is invalid")
+        result: list[dict[str, Any]] = []
+        for raw in rows:
+            if not isinstance(raw, dict) or str(raw.get("type", "")).casefold() != "journal":
+                continue
+            publisher = str(raw.get("host_organization_name", ""))
+            homepage = str(raw.get("homepage_url", ""))
+            if "wiley" not in f"{publisher} {homepage}".casefold():
+                continue
+            row = dict(raw)
+            source_id = str(raw.get("id", "")).rsplit("/", 1)[-1]
+            row["topic_count"] = source_counts.get(source_id, 0)
+            result.append(row)
+        result.sort(key=lambda row: (-int(row.get("topic_count", 0) or 0), str(row.get("display_name", "")).casefold()))
+        return result[: self.journal_batch_limit]
+
+    @staticmethod
+    def _journal_code(journal: dict[str, Any]) -> str:
+        homepage = str(journal.get("homepage_url", "")).strip()
+        match = re.search(r"/journal/([^/?#]+)", homepage, re.I)
+        if match:
+            return re.sub(r"[^0-9a-z]", "", match.group(1).casefold())
+        issn = str(journal.get("issn_l", "")).strip()
+        return re.sub(r"[^0-9x]", "", issn.casefold())
+
+    @classmethod
+    def _call_paths(cls, journal: dict[str, Any]) -> list[str]:
+        code = cls._journal_code(journal)
+        if not code:
+            return []
+        return [
+            f"https://onlinelibrary.wiley.com/page/journal/{code}/homepage/call_for_papers.html",
+            f"https://onlinelibrary.wiley.com/journal/{code}/homepage/call_for_papers",
+            f"https://onlinelibrary.wiley.com/page/journal/{code}/homepage/call-for-papers",
+            f"https://onlinelibrary.wiley.com/page/journal/{code}/homepage/call-for-papers.html",
+        ]
+
+    @staticmethod
+    def _reader_url(url: str) -> str:
+        parts = urlsplit(url)
+        target = urlunsplit(("http", parts.netloc, parts.path, parts.query, ""))
+        return "https://r.jina.ai/" + target
+
+    @staticmethod
+    def _listing_records(text: str, listing_url: str, journal: dict[str, Any]) -> list[dict[str, Any]]:
+        rows = _structured_records(text) or _fallback_records(text, listing_url)
+        if not rows:
+            markdown_links = list(
+                re.finditer(r"\[([^\]]{12,240})\]\((https?://[^)]+|/[^)]+)\)", text, re.I)
+            )
+            deadline_pattern = re.compile(
+                r"(?:submission\s+deadline|deadline\s+for\s+submissions?|open\s+for\s+submissions?.{0,20}until)\s*[:：]?\s*"
+                r"([0-3]?\d\s+[A-Za-z]+\s+20\d{2}|[A-Za-z]+\s+[0-3]?\d(?:st|nd|rd|th)?,?\s+20\d{2}|20\d{2}-\d{1,2}-\d{1,2})",
+                re.I,
+            )
+            for index, link in enumerate(markdown_links):
+                end = markdown_links[index + 1].start() if index + 1 < len(markdown_links) else min(len(text), link.end() + 2600)
+                nearby = _clean_html(text[link.end() : end])
+                deadline = deadline_pattern.search(nearby)
+                title = _clean_html(link.group(1))
+                if title and deadline:
+                    rows.append(
+                        {
+                            "title": title,
+                            "deadline": deadline.group(1),
+                            "official_url": _safe_url(link.group(2), listing_url),
+                            "scope_text": nearby[:1600],
+                        }
+                    )
+        if not rows:
+            deadline_pattern = re.compile(
+                r"(?:submission\s+deadline|deadline\s+for\s+submissions?|open\s+for\s+submissions?.{0,20}until)\s*[:：]?\s*"
+                r"([0-3]?\d\s+[A-Za-z]+\s+20\d{2}|[A-Za-z]+\s+[0-3]?\d(?:st|nd|rd|th)?,?\s+20\d{2})",
+                re.I,
+            )
+            for heading in re.finditer(r"<h[2-5]\b[^>]*>(.*?)</h[2-5]>", text, re.I | re.S):
+                title = _clean_html(heading.group(1))
+                nearby = _clean_html(text[heading.end() : heading.end() + 2400])
+                deadline = deadline_pattern.search(nearby)
+                link = re.search(r"href=[\"']([^\"']+)", heading.group(1), re.I)
+                if title and deadline:
+                    rows.append(
+                        {
+                            "title": title,
+                            "deadline": deadline.group(1),
+                            "official_url": _safe_url(link.group(1), listing_url) if link else listing_url,
+                            "scope_text": nearby[:1600],
+                        }
+                    )
+        journal_name = _clean_html(journal.get("display_name", ""))
+        issn = str(journal.get("issn_l", "")).strip()
+        result: list[dict[str, Any]] = []
+        for raw in rows:
+            row = dict(raw)
+            row["journal"] = str(row.get("journal", "")).strip() or journal_name
+            row["issn"] = str(row.get("issn", "")).strip() or issn
+            row["publisher"] = "Wiley"
+            row["type"] = "special_issue"
+            result.append(row)
+        return result
+
+    def fetch(
+        self,
+        *,
+        since: datetime,
+        progress: Callable[..., None] | None = None,
+        keywords: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if self._urls:
+            return super().fetch(since=since, progress=progress, keywords=keywords)
+        del since
+        if progress:
+            progress("正在用 OpenAlex 定位 Wiley 相关期刊…", 10)
+        try:
+            journals = self._openalex_journals(keywords)
+        except Exception as error:
+            if progress:
+                progress(f"Wiley 期刊定位失败，已继续：{error}", 0)
+            return []
+        rows: list[dict[str, Any]] = []
+        consecutive_failures = 0
+        for index, journal in enumerate(journals, start=1):
+            code = self._journal_code(journal)
+            if not code:
+                continue
+            if progress:
+                progress(f"正在读取 Wiley 期刊征稿页（{index}/{len(journals)}）…", 15 + int(index * 80 / max(1, len(journals))))
+            paths = self._call_paths(journal)[: self.route_limit]
+            discovered_for_journal = False
+            for url in paths:
+                try:
+                    text = self._fetcher(url)
+                except Exception:
+                    continue
+                discovered = self._listing_records(text, url, journal)
+                if not discovered:
+                    self._record_error(url, "parse", "Wiley page did not contain recognizable open call records")
+                    continue
+                rows.extend(self._decorate(discovered, url, text))
+                discovered_for_journal = True
+                break
+            if discovered_for_journal:
+                consecutive_failures = 0
+                continue
+            for url in paths:
+                reader_url = self._reader_url(url)
+                try:
+                    text = self._fetcher(reader_url)
+                except Exception:
+                    continue
+                discovered = self._listing_records(text, url, journal)
+                if not discovered:
+                    self._record_error(reader_url, "parse", "Wiley read-only page did not contain recognizable open call records")
+                    continue
+                for row in discovered:
+                    row["is_aggregator"] = True
+                    row["discovery_url"] = reader_url
+                rows.extend(self._decorate(discovered, reader_url, text))
+                discovered_for_journal = True
+                break
+            if discovered_for_journal:
+                consecutive_failures = 0
+                continue
+            consecutive_failures += 1
+            if consecutive_failures >= self.consecutive_failure_limit:
+                self._record_error(
+                    "https://onlinelibrary.wiley.com/",
+                    "circuit_breaker",
+                    f"Wiley 连续 {consecutive_failures} 本相关期刊的官方页和只读入口均不可用，本轮已停止余下探测",
+                )
+                if progress:
+                    progress("Wiley 连续入口失败，本轮已提前结束并保留下次补跑机会。", 95)
+                break
+        return self._dedupe(_rank_relevant(rows, keywords, limit=0))
 
 
 class TaylorFrancisCallsSource(_BaseSource):
@@ -1113,7 +1372,9 @@ class TaylorFrancisCallsSource(_BaseSource):
 
         def request(query: str) -> tuple[list[dict[str, Any]], Exception | None]:
             found: list[dict[str, Any]] = []
-            for page in range(1, 4):
+            page = 1
+            seen_ids: set[str] = set()
+            while True:
                 params = {
                     "search": query,
                     "page": page,
@@ -1132,9 +1393,21 @@ class TaylorFrancisCallsSource(_BaseSource):
                         return found, ValueError("Invalid source JSON")
                 except Exception as error:
                     return found, error
-                found.extend(self._api_rows(payload, request_url))
+                parsed = self._api_rows(payload, request_url)
+                new_rows = []
+                for row in parsed:
+                    key = str(row.get("id", row.get("official_url", "")))
+                    if key and key in seen_ids:
+                        continue
+                    if key:
+                        seen_ids.add(key)
+                    new_rows.append(row)
+                found.extend(new_rows)
                 if len(payload) < 20:
                     break
+                if not new_rows:
+                    break
+                page += 1
             return found, None
 
         with ThreadPoolExecutor(max_workers=min(4, len(queries))) as executor:
@@ -1154,7 +1427,7 @@ class TaylorFrancisCallsSource(_BaseSource):
             _rank_relevant(
                 self._decorate(rows, self.api_url),
                 _discovery_queries(keywords, limit=5),
-                limit=24,
+                limit=0,
                 minimum_score=4,
             )
         )
@@ -1285,13 +1558,295 @@ class AggregatorDiscoverySource(_BaseSource):
         return self._dedupe(rows)
 
 
+class GeoDeadlinesSource(_BaseSource):
+    """MIT-licensed geospatial special-issue calendar with official links."""
+
+    source_id = "geodeadlines"
+    is_aggregator = True
+    urls = ("https://yingjinghuang.github.io/geo-deadlines/calendar/special-issues.ics",)
+
+    @staticmethod
+    def _events(text: str) -> list[dict[str, Any]]:
+        unfolded = re.sub(r"\r?\n[ \t]", "", str(text or ""))
+        rows: list[dict[str, Any]] = []
+        for block in re.findall(r"BEGIN:VEVENT(.*?)END:VEVENT", unfolded, re.I | re.S):
+            fields: dict[str, str] = {}
+            for line in block.splitlines():
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                fields[key.split(";", 1)[0].upper()] = value.replace(r"\n", "\n").replace(r"\,", ",").strip()
+            title = fields.get("SUMMARY", "").strip()
+            deadline = fields.get("DTSTART", "").strip()
+            if re.fullmatch(r"\d{8}", deadline):
+                deadline = f"{deadline[:4]}-{deadline[4:6]}-{deadline[6:8]}"
+            description = fields.get("DESCRIPTION", "").strip()
+            url = fields.get("URL", "").strip()
+            journal_match = re.search(r"(?:journal|期刊)\s*[:：]\s*([^\n;|]+)", description, re.I)
+            publisher_match = re.search(r"(?:publisher|出版社)\s*[:：]\s*([^\n;|]+)", description, re.I)
+            journal = journal_match.group(1).strip() if journal_match else ""
+            if not title or not deadline:
+                continue
+            rows.append(
+                {
+                    "source_record_id": fields.get("UID", ""),
+                    "title": title,
+                    "deadline": deadline,
+                    "official_url": url,
+                    "journal": journal,
+                    "participating_journals": [journal] if journal else [],
+                    "publisher": publisher_match.group(1).strip() if publisher_match else "",
+                    "scope_text": description,
+                    "keywords": [value.strip() for value in fields.get("CATEGORIES", "").split(",") if value.strip()],
+                    "updated_at": fields.get("LAST-MODIFIED", fields.get("DTSTAMP", "")),
+                    "type": "special_issue",
+                    "publisher_identity_verified": False,
+                }
+            )
+        return rows
+
+    def fetch(self, *, since: datetime, progress: Callable[..., None] | None = None, keywords: list[str] | None = None) -> list[dict[str, Any]]:
+        del since
+        rows: list[dict[str, Any]] = []
+        for index, url in enumerate(self._urls, start=1):
+            if progress:
+                progress("正在读取 GeoDeadlines 特刊日历…", int(index * 100 / len(self._urls)))
+            try:
+                text = self._fetcher(url)
+            except Exception:
+                continue
+            discovered = self._events(text)
+            relevant = [value for value in discovered if not keywords or _keyword_relevance(value, keywords) > 0]
+            rows.extend(self._decorate(relevant, url, text))
+        return self._dedupe(rows)
+
+
+class ResearchCollectionRadarSource(_BaseSource):
+    """MIT-licensed public collection index; each record keeps its official URL."""
+
+    source_id = "research_collection_radar"
+    is_aggregator = True
+    urls = (
+        "https://hideh1231.github.io/research-collection-radar/data/collections.json",
+        "https://raw.githubusercontent.com/hideh1231/research-collection-radar/main/OPEN.md",
+    )
+
+    @staticmethod
+    def _json_rows(text: str) -> list[dict[str, Any]]:
+        payload = _json_document(text)
+        values = payload.get("collections", payload.get("items", [])) if isinstance(payload, dict) else payload
+        rows: list[dict[str, Any]] = []
+        for raw in values if isinstance(values, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            journals = raw.get("journals", raw.get("journal", []))
+            if isinstance(journals, str):
+                journals = [journals]
+            journal_names = [
+                _nested_name(value) for value in journals if _nested_name(value)
+            ] if isinstance(journals, list) else []
+            deadline = _first(raw, "deadline", "deadline_date", "submission_deadline")
+            deadline_state = str(_first(raw, "deadline_status", "deadline_state")).casefold()
+            rolling = deadline_state in {"not_listed", "rolling"} or bool(raw.get("rolling"))
+            topics = [
+                *(_first(raw, "topics", "fields", "domains") if isinstance(_first(raw, "topics", "fields", "domains"), list) else []),
+                *(raw.get("publisher_keywords", []) if isinstance(raw.get("publisher_keywords"), list) else []),
+            ]
+            rows.append(
+                {
+                    "source_record_id": str(_first(raw, "id", "collection_id")),
+                    "title": _clean_html(_first(raw, "title", "name")),
+                    "deadline": str(deadline or ""),
+                    "rolling": rolling,
+                    "official_url": _clean_html(_first(raw, "source_url", "official_url", "url")),
+                    "journal": journal_names[0] if journal_names else _nested_name(raw.get("journal")),
+                    "participating_journals": journal_names,
+                    "publisher": _nested_name(raw.get("publisher")) or str(raw.get("publisher_keyword", "")),
+                    "scope_text": _clean_html(_first(raw, "summary", "description", "scope")),
+                    "keywords": list(dict.fromkeys(str(value).strip() for value in topics if str(value).strip())),
+                    "updated_at": str(_first(raw, "metadata_checked_at", "deadline_checked_at", "last_checked", "updated_at", "last_verified")),
+                    "type": str(_first(raw, "collection_type", "type") or "special_issue"),
+                    "call_status": str(raw.get("status", "")),
+                    "publisher_identity_verified": False,
+                }
+            )
+        return [value for value in rows if value.get("title") and (value.get("deadline") or value.get("rolling"))]
+
+    @staticmethod
+    def _markdown_rows(text: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for line in str(text or "").splitlines():
+            if not line.startswith("|") or line.startswith("| ---") or "| Deadline |" in line:
+                continue
+            cells = [value.strip() for value in line.strip().strip("|").split("|")]
+            if len(cells) < 6 or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cells[0]):
+                continue
+            fields = [value.strip() for value in cells[3].split(",") if value.strip()]
+            rows.append(
+                {
+                    "title": cells[1],
+                    "deadline": cells[0],
+                    "official_url": cells[5],
+                    "journal": cells[2],
+                    "participating_journals": [cells[2]] if cells[2] else [],
+                    "publisher": "",
+                    "scope_text": " ".join([cells[1], *fields]),
+                    "keywords": fields,
+                    "type": cells[4] or "special_issue",
+                    "publisher_identity_verified": False,
+                }
+            )
+        return rows
+
+    def fetch(self, *, since: datetime, progress: Callable[..., None] | None = None, keywords: list[str] | None = None) -> list[dict[str, Any]]:
+        del since
+        for index, url in enumerate(self._urls, start=1):
+            if progress:
+                progress(f"正在读取 Research Collection Radar（{index}/{len(self._urls)}）…", int(index * 100 / len(self._urls)))
+            try:
+                text = self._fetcher(url)
+            except Exception:
+                continue
+            rows = self._json_rows(text) or self._markdown_rows(text)
+            if not rows:
+                continue
+            relevant = [value for value in rows if not keywords or _keyword_relevance(value, keywords) > 0]
+            return self._dedupe(self._decorate(relevant, url, text))
+        return []
+
+
+class JournalCfpDdlSource(_BaseSource):
+    """Low-trust MIT shard index; relevant rows only, with no count quota."""
+
+    source_id = "journal_cfp_ddl"
+    is_aggregator = True
+    index_url = "https://dodoxxb.github.io/journal-cfp-ddl/data/index.json"
+    urls = (index_url,)
+
+    @staticmethod
+    def _row(raw: dict[str, Any]) -> dict[str, Any]:
+        journals = raw.get("js", []) if isinstance(raw.get("js"), list) else []
+        journal = str(raw.get("j", "")).strip() or (str(journals[0]).strip() if journals else "")
+        return {
+            "source_record_id": str(raw.get("id", "")),
+            "title": str(raw.get("t", "")).strip(),
+            "deadline": str(raw.get("d", "")).strip(),
+            "rolling": bool(raw.get("rolling")),
+            "official_url": str(raw.get("u", "")).strip(),
+            "journal": journal,
+            "participating_journals": [str(value).strip() for value in journals if str(value).strip()] or ([journal] if journal else []),
+            "publisher": str(raw.get("p", "")).strip(),
+            "scope_text": str(raw.get("x", "")).strip(),
+            "keywords": [str(value).strip() for value in raw.get("g", []) if str(value).strip()] if isinstance(raw.get("g"), list) else [],
+            "issn": str(raw.get("is", "")).strip(),
+            "type": str(raw.get("ty", "special_issue")),
+            "publisher_identity_verified": False,
+        }
+
+    def fetch(
+        self,
+        *,
+        since: datetime,
+        progress: Callable[..., None] | None = None,
+        keywords: list[str] | None = None,
+        today: date | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        shard_checkpoints: dict[str, Any] | None = None,
+        retry_failed_only: bool = False,
+        on_shard: Callable[..., None] | None = None,
+    ) -> list[dict[str, Any]]:
+        del since
+        if not keywords:
+            return []
+        is_cancelled = cancelled or (lambda: False)
+        if is_cancelled():
+            return []
+        index_text = self._fetcher(self.index_url)
+        payload = _json_document(index_text)
+        if not isinstance(payload, dict):
+            self._record_error(self.index_url, "parse", "Invalid CFP shard index")
+            return []
+        today = today or date.today()
+
+        def month_key(offset: int) -> str:
+            month_number = today.year * 12 + today.month - 1 + offset
+            return f"{month_number // 12:04d}-{month_number % 12 + 1:02d}"
+
+        # Keep the working set bounded and useful: current month, the next two
+        # months, then rolling calls.  The explicit order is also the UI's
+        # progress order.
+        wanted = [month_key(0), month_key(1), month_key(2), "rolling"]
+        available: dict[str, str] = {}
+        for value in payload.get("months", []):
+            if not isinstance(value, dict):
+                continue
+            month = str(value.get("name", ""))
+            file_name = str(value.get("file", "")).strip()
+            if month in wanted and file_name:
+                available[month] = file_name
+        checkpoints = shard_checkpoints if isinstance(shard_checkpoints, dict) else {}
+        shards = [
+            (month, available[month])
+            for month in wanted
+            if month in available
+            and (
+                not retry_failed_only
+                or str(checkpoints.get(month, {}).get("status", "pending")) != "success"
+            )
+        ]
+        rows: list[dict[str, Any]] = []
+        for index, (month, file_name) in enumerate(shards, start=1):
+            url = urljoin(self.index_url, file_name)
+            if is_cancelled():
+                self._record_error(url, "cancelled", "用户已取消")
+                if on_shard:
+                    on_shard(shard_id=month, file_name=file_name, rows=[], status="cancelled", error="用户已取消")
+                break
+            if progress:
+                progress(f"正在读取 CFP 分片 {month}（{index}/{len(shards)}）…", int(index * 100 / max(1, len(shards))))
+            try:
+                text = self._fetcher(url)
+            except Exception as error:
+                if on_shard:
+                    on_shard(shard_id=month, file_name=file_name, rows=[], status="failed", error=str(error)[:240])
+                continue
+            values = _json_document(text)
+            shard_rows: list[dict[str, Any]] = []
+            shard_cancelled = False
+            for raw in values if isinstance(values, list) else []:
+                if is_cancelled():
+                    shard_cancelled = True
+                    break
+                if not isinstance(raw, dict):
+                    continue
+                row = self._row(raw)
+                if row["title"] and _keyword_relevance(row, keywords) > 0:
+                    shard_rows.extend(self._decorate([row], url))
+            shard_rows = self._dedupe(shard_rows)
+            rows.extend(shard_rows)
+            if shard_cancelled:
+                self._record_error(url, "cancelled", "用户已取消")
+            if on_shard:
+                on_shard(
+                    shard_id=month,
+                    file_name=file_name,
+                    rows=shard_rows,
+                    status="cancelled" if shard_cancelled else "success",
+                    error="用户已取消" if shard_cancelled else "",
+                )
+            if shard_cancelled:
+                break
+        return self._dedupe(rows)
+
+
 def default_special_issue_sources() -> list[_BaseSource]:
     return [
         FrontiersResearchTopicsSource(),
-        ElsevierCallsSource(),
         SpringerCollectionsSource(),
         WileyCallsSource(),
         TaylorFrancisCallsSource(),
         MdpiSpecialIssuesSource(),
-        AggregatorDiscoverySource(),
+        GeoDeadlinesSource(),
+        ResearchCollectionRadarSource(),
+        JournalCfpDdlSource(),
     ]

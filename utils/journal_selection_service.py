@@ -11,19 +11,22 @@ from uuid import uuid4
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from utils.api_rate_limit import rate_limited_urlopen as urlopen
 
 from utils.evidence_cache import EvidenceCache
 from utils.frontier_scoring import canonical_text, primary_jcr_quartile
 from utils.frontier_service import dedupe_works
 from utils.journal_quality import journal_quality_snapshot
 from utils.publisher_utils import canonical_publisher
+from utils.v13_policy import selection_hard_gate
 
 
 OPENALEX_API = "https://api.openalex.org"
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1"
 CROSSREF_API = "https://api.crossref.org"
-SELECTION_USER_AGENT = "ResearchAssistant/12 (personal desktop research tool)"
+SELECTION_USER_AGENT = "ResearchAssistant/13 (personal desktop research tool)"
 
 
 def _public_json(url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -300,6 +303,70 @@ def derive_journal_candidates(works: list[dict[str, Any]]) -> list[dict[str, Any
     return candidates
 
 
+def _journal_library_recall() -> list[dict[str, Any]]:
+    """Return the complete watched library as a recall lane, not a hard whitelist."""
+    try:
+        from utils.file_manager import load_journal_library
+
+        journals = load_journal_library()
+    except Exception:
+        return []
+    priority_order = {"必看": 0, "关注": 1, "扩展": 2, "不订阅": 3}
+    result: list[dict[str, Any]] = []
+    for raw in journals if isinstance(journals, list) else []:
+        if not isinstance(raw, dict) or not str(raw.get("name", "")).strip():
+            continue
+        candidate = deepcopy(raw)
+        candidate["issns"] = _issns(candidate.get("issn", candidate.get("issns", [])))
+        candidate["recall_lane"] = "journal_library"
+        candidate["local_library_evidence"] = {
+            "id": str(candidate.get("id", "")),
+            "name": str(candidate.get("name", "")),
+            "checked_at": str(candidate.get("metadata_updated_at", candidate.get("updated_at", ""))),
+        }
+        result.append(candidate)
+    result.sort(
+        key=lambda value: (
+            priority_order.get(str(value.get("frontier_priority", "不订阅")), 4),
+            canonical_text(value.get("name", "")),
+        )
+    )
+    return result
+
+
+def _merge_selection_recall(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for group in groups:
+        for raw in group:
+            if not isinstance(raw, dict):
+                continue
+            key = _selection_candidate_key(raw)
+            if not key:
+                continue
+            if key not in merged:
+                merged[key] = deepcopy(raw)
+                order.append(key)
+                continue
+            current = merged[key]
+            for field, value in raw.items():
+                if current.get(field) in (None, "", (), []) and value not in (None, "", (), []):
+                    current[field] = deepcopy(value)
+            current["recall_lanes"] = list(
+                dict.fromkeys(
+                    value
+                    for value in [
+                        *current.get("recall_lanes", []),
+                        current.get("recall_lane", "similar_papers"),
+                        *raw.get("recall_lanes", []),
+                        raw.get("recall_lane", "similar_papers"),
+                    ]
+                    if str(value).strip()
+                )
+            )
+    return [merged[key] for key in order]
+
+
 def _identity_journal_key(candidate: dict[str, Any]) -> str:
     issns = _issns(candidate.get("issns", candidate.get("issn", [])))
     if issns:
@@ -520,13 +587,13 @@ def score_journal_candidate(
     profile = profile if isinstance(profile, dict) else {}
     history = history if isinstance(history, dict) else {}
     constraints = constraints if isinstance(constraints, dict) else {}
-    status, quartile = primary_jcr_quartile(journal)
-    if bool(constraints.get("filter_known_q3_q4", False)) and status in {"verified", "manual"} and quartile in {"Q3", "Q4"}:
+    allowed, gate_reason = selection_hard_gate(journal, constraints)
+    if not allowed:
         return {
             "journal_id": str(journal.get("id", "")),
             "journal_name": str(journal.get("name", "")),
             "excluded": True,
-            "exclusion_reason": f"已核验 {quartile}，当前设置过滤三四区期刊",
+            "exclusion_reason": gate_reason,
             "topic_fit": 0,
             "quality": 0,
             "personal_experience": 0,
@@ -536,7 +603,7 @@ def score_journal_candidate(
             "total_score": 0,
             "matches": [],
             "reasons": [],
-            "risks": [f"已核验 {quartile}"],
+            "risks": [gate_reason],
         }
 
     terms = _paper_terms(paper, profile)
@@ -711,7 +778,7 @@ def normalize_selection_requirements(raw: dict[str, Any] | None) -> dict[str, An
         "quartile_target": quartile_target,
         "speed_priority": speed_priority,
         "fit_strictness": fit_strictness,
-        "filter_known_q3_q4": bool(raw.get("filter_known_q3_q4", True)),
+        "filter_known_q3_q4": bool(raw.get("filter_known_q3_q4", False)),
         "avoid_previously_rejected": bool(raw.get("avoid_previously_rejected", False)),
         "publishers": publishers,
         "fee_modes": fee_modes,
@@ -853,24 +920,163 @@ def _rejected_selection_keys(rejected: list[dict[str, Any]]) -> tuple[set[str], 
 
 
 def _strict_division_match(journal: dict[str, Any], requirements: dict[str, Any], ready: bool) -> bool:
-    if not ready:
-        return True
-    jcr_targets = set(requirements.get("jcr_quartiles", []))
-    cas_targets = set(requirements.get("cas_quartiles", []))
-    if jcr_targets:
-        snapshot = journal_quality_snapshot(journal)
-        if snapshot.get("jcr_status") not in {"verified", "manual"} or snapshot.get("jcr_quartile") not in jcr_targets:
-            return False
-    if cas_targets:
-        cas = _cas_quartile(journal)
-        if not cas or cas not in cas_targets:
-            return False
-    return True
+    del ready  # Readiness controls enrichment, never whether a hard constraint is enforced.
+    return selection_hard_gate(journal, requirements)[0]
 
 
 def _fee_match_set(journal: dict[str, Any]) -> set[str]:
     _mode, supported = _fee_modes_for_journal(journal)
     return supported
+
+
+SELECTION_AI_BATCH_SIZE = 5
+
+
+def _selection_identity_tokens(journal: dict[str, Any]) -> set[str]:
+    """Return every stable alias used to merge a journal across recall lanes."""
+
+    tokens = {f"issn:{value}" for value in _issns(journal.get("issns", journal.get("issn", [])))}
+    name = canonical_journal_name(journal.get("name", journal.get("journal_name", "")))
+    if name:
+        tokens.add("name:" + name)
+    return tokens
+
+
+def _dedupe_verified_selection_batch(
+    journals: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Merge post-verification aliases before they consume AI capacity."""
+
+    merged: list[dict[str, Any]] = []
+    token_positions: dict[str, int] = {}
+    duplicate_count = 0
+    for raw in journals:
+        journal = deepcopy(raw)
+        tokens = _selection_identity_tokens(journal)
+        position = next((token_positions[value] for value in tokens if value in token_positions), None)
+        if position is None:
+            position = len(merged)
+            merged.append(journal)
+        else:
+            duplicate_count += 1
+            current = merged[position]
+            for field, value in journal.items():
+                if current.get(field) in (None, "", [], ()) and value not in (None, "", [], ()):
+                    current[field] = deepcopy(value)
+            for field in ("similar_papers", "discovery_sources", "recall_lanes"):
+                values: list[Any] = []
+                seen: set[str] = set()
+                for value in [*current.get(field, []), *journal.get(field, [])]:
+                    marker = repr(value)
+                    if marker not in seen:
+                        seen.add(marker)
+                        values.append(deepcopy(value))
+                if values:
+                    current[field] = values
+            current["occurrence_count"] = max(
+                int(current.get("occurrence_count", 0) or 0),
+                len(current.get("similar_papers", [])),
+            )
+            tokens.update(_selection_identity_tokens(current))
+        for token in tokens:
+            token_positions[token] = position
+    return merged, duplicate_count
+
+
+def _assess_verified_journals_in_batches(
+    manuscript: dict[str, Any],
+    journals: list[dict[str, Any]],
+    requirements: dict[str, Any],
+    *,
+    emit: Any,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Run small independent AI batches and preserve actionable failures."""
+
+    assessments: dict[str, dict[str, Any]] = {}
+    errors: list[dict[str, Any]] = []
+    consecutive_transport_failures = 0
+    for offset in range(0, len(journals), SELECTION_AI_BATCH_SIZE):
+        batch = journals[offset : offset + SELECTION_AI_BATCH_SIZE]
+        start, end = offset + 1, offset + len(batch)
+        emit(f"AI 正在复核候选期刊（{start}-{end}/{len(journals)}）…", 72 + int(end * 18 / max(1, len(journals))))
+        try:
+            response = _assess_verified_journals_with_ai(
+                manuscript,
+                batch,
+                requirements,
+                progress=None,
+            )
+        except Exception as error:  # noqa: BLE001 - the next batch can still succeed
+            row = {
+                "start": start,
+                "end": end,
+                "error_type": type(error).__name__,
+                "error": str(error)[:240],
+            }
+            errors.append(row)
+            from utils.ai_service import is_ai_transport_failure
+
+            consecutive_transport_failures = (
+                consecutive_transport_failures + 1 if is_ai_transport_failure(error) else 0
+            )
+            if consecutive_transport_failures >= 2:
+                row["circuit_open"] = True
+                break
+            continue
+        consecutive_transport_failures = 0
+        if isinstance(response, dict):
+            assessments.update(
+                {
+                    str(key): deepcopy(value)
+                    for key, value in response.items()
+                    if str(key) and isinstance(value, dict)
+                }
+            )
+        expected = {
+            str(value.get("id", ""))
+            for value in batch
+            if bool((value.get("identity_evidence") or {}).get("verified"))
+            and str(value.get("id", ""))
+        }
+        missing = sorted(expected - set(assessments))
+        if missing:
+            errors.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "error_type": "partial_response",
+                    "error": f"AI 未返回 {len(missing)} 个已核验候选的评分",
+                    "missing_ids": missing,
+                }
+            )
+    return assessments, errors
+
+
+def _aggregate_selection_ai_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep batch failure counts without repeating the same network message."""
+
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for value in errors:
+        error_type = str(value.get("error_type", "error"))
+        message = str(value.get("error", ""))[:240]
+        key = (error_type, message)
+        row = grouped.setdefault(
+            key,
+            {
+                "error_type": error_type,
+                "error": message,
+                "occurrences": 0,
+                "batch_ranges": [],
+            },
+        )
+        row["occurrences"] += 1
+        if len(row["batch_ranges"]) < 8:
+            row["batch_ranges"].append([int(value.get("start", 0) or 0), int(value.get("end", 0) or 0)])
+        if value.get("missing_ids") and "missing_ids" not in row:
+            row["missing_ids"] = list(value.get("missing_ids", []))[:20]
+        if value.get("circuit_open"):
+            row["circuit_open"] = True
+    return list(grouped.values())
 
 
 def run_selection_rounds(
@@ -899,10 +1105,21 @@ def run_selection_rounds(
     rejected_names, rejected_issns = _rejected_selection_keys(rejected)
     emit("正在从相似真实论文生成候选期刊…", 4)
     similar_works = find_similar_works(manuscript, cache=cache, progress=progress)
-    initial_candidates = derive_journal_candidates(similar_works)
+    initial_candidates = _merge_selection_recall(
+        derive_journal_candidates(similar_works),
+        _journal_library_recall(),
+    )
+    try:
+        from utils.research_profile_repository import load_research_profile
+
+        research_profile = load_research_profile()
+    except Exception:
+        research_profile = {}
     searched: set[str] = set()
-    admitted: set[str] = set()
+    admitted_tokens: set[str] = set()
     results: list[dict[str, Any]] = []
+    retained_candidates: list[dict[str, Any]] = []
+    ai_errors: list[dict[str, Any]] = []
     rejected_counts = {
         "previously_rejected": 0,
         "identity_or_inactive": 0,
@@ -920,8 +1137,6 @@ def run_selection_rounds(
         for value in normalized.get("publishers", [])
         if str(value).strip()
     }
-    threshold = topic_fit_threshold(normalized.get("fit_strictness", "balanced"))
-
     for round_index in range(1, rounds_limit + 1):
         rounds_completed = round_index
         emit(f"第 {round_index}/{rounds_limit} 轮：补充并核验候选期刊…", min(8 + round_index * 9, 82))
@@ -945,13 +1160,44 @@ def run_selection_rounds(
                 rejected_counts["previously_rejected"] += 1
                 continue
             key = _selection_candidate_key(candidate)
-            if not key or key in searched or key in admitted:
+            if not key or key in searched or bool(_selection_identity_tokens(candidate) & admitted_tokens):
                 rejected_counts["duplicate"] += 1
                 continue
             searched.add(key)
             emit(f"正在核验“{name[:42]}”的身份、ISSN、出版社和官网…", min(12 + round_index * 9, 84))
-            identity = verify_journal_identity(candidate, cache=cache)
-            if not identity.get("verified") or identity.get("active") is not True:
+            if candidate.get("local_library_evidence"):
+                publication_state = canonical_text(candidate.get("status", candidate.get("publication_status", "")))
+                identity = {
+                    "verified": True,
+                    "name": name,
+                    "issns": _issns(candidate.get("issns", candidate.get("issn", []))),
+                    "publisher": str(candidate.get("publisher", "")),
+                    "official_url": str(candidate.get("website", candidate.get("homepage", ""))),
+                    "active": publication_state not in {"ceased", "discontinued", "inactive", "stopped", "停刊"},
+                    "sources": [{"source": "journal_library"}],
+                    "verified_at": str(candidate.get("metadata_updated_at", "")),
+                    "conflicts": [],
+                    "missing": [],
+                    "reason": "本地期刊库召回",
+                }
+            else:
+                try:
+                    identity = verify_journal_identity(candidate, cache=cache)
+                except Exception as error:  # A single unavailable registry must not abort the selection run.
+                    identity = {
+                        "verified": False,
+                        "name": name,
+                        "issns": _issns(candidate.get("issns", candidate.get("issn", []))),
+                        "publisher": str(candidate.get("publisher", "")).strip(),
+                        "official_url": str(candidate.get("website", candidate.get("homepage", ""))).strip(),
+                        "active": None,
+                        "sources": [],
+                        "verified_at": "",
+                        "conflicts": [],
+                        "missing": ["期刊身份来源暂时不可用"],
+                        "reason": f"期刊身份来源暂时不可用：{error}",
+                    }
+            if identity.get("active") is False:
                 rejected_counts["identity_or_inactive"] += 1
                 continue
             journal = {
@@ -964,8 +1210,14 @@ def run_selection_rounds(
                 "website": str(identity.get("official_url", "")),
                 "identity_evidence": identity,
             }
+            if not identity.get("verified"):
+                journal["identity_status"] = "pending_verification"
+                journal["active"] = None
+                journal["verification_reason"] = str(identity.get("reason", "身份来源暂时无法核验"))
+            else:
+                journal["identity_status"] = "verified"
             actual_publisher = canonical_text(canonical_publisher(str(journal.get("publisher", ""))))
-            if publisher_targets and actual_publisher not in publisher_targets:
+            if publisher_targets and actual_publisher and actual_publisher not in publisher_targets:
                 rejected_counts["publisher"] += 1
                 continue
             journal = _verify_selection_divisions(journal, ready)
@@ -980,42 +1232,75 @@ def run_selection_rounds(
                 rejected_counts["division"] += 1
                 continue
             verified_batch.append(journal)
-        assessments = (
-            _assess_verified_journals_with_ai(manuscript, verified_batch, normalized, progress=progress)
-            if verified_batch
-            else {}
-        )
+        verified_batch, duplicate_count = _dedupe_verified_selection_batch(verified_batch)
+        rejected_counts["duplicate"] += duplicate_count
+        if verified_batch:
+            assessments, batch_errors = _assess_verified_journals_in_batches(
+                manuscript,
+                verified_batch,
+                normalized,
+                emit=emit,
+            )
+            ai_errors.extend(batch_errors)
+        else:
+            assessments = {}
         growth = 0
         for journal in verified_batch:
             assessment = assessments.get(str(journal.get("id", "")), {})
-            try:
-                fit_score = max(0, min(100, int(round(float(assessment.get("fit_score", 0))))))
-            except (TypeError, ValueError):
-                fit_score = 0
-            if fit_score < threshold:
-                rejected_counts["topic_fit"] += 1
+            from utils.v13_policy import score_journal_selection
+
+            ai_payload = assessment.get("ai_axis_payload") if isinstance(assessment, dict) else None
+            if ai_payload is None and isinstance(assessment, dict) and isinstance(assessment.get("axes"), dict):
+                ai_payload = assessment
+            scored = score_journal_selection(
+                manuscript,
+                journal,
+                research_profile if isinstance(research_profile, dict) else {},
+                normalized,
+                ai_payload=ai_payload,
+            )
+            if scored.get("objective_excluded"):
+                rejected_counts["identity_or_inactive"] += 1
                 continue
             key = _selection_candidate_key(journal)
-            if key in admitted:
+            identity_tokens = _selection_identity_tokens(journal)
+            if identity_tokens & admitted_tokens:
                 rejected_counts["duplicate"] += 1
                 continue
-            admitted.add(key)
+            admitted_tokens.update(identity_tokens)
             fee_matches = _fee_match_set(journal)
             wanted_fees = set(normalized.get("fee_modes", [])) - {"any"}
             fee_bonus = 3 if wanted_fees and fee_matches.intersection(wanted_fees) else 0
-            speed_score, speed_text = _time_score(assessment, normalized.get("speed_priority", "standard"))
-            ranking_score = fit_score + fee_bonus + speed_score
+            speed_score, speed_text = _time_score(journal, normalized.get("speed_priority", "standard"))
+            fit_score = int(scored.get("fit_score", 0) or 0)
+            strategy_score = int(scored.get("strategy_score", 0) or 0)
+            if not scored.get("tier"):
+                rejected_counts["topic_fit"] += 1
+            ranking_score = int(scored.get("total_score", 0) or 0) + fee_bonus + speed_score
             result_id = key or "journal:" + hashlib.sha1(str(journal.get("name", "")).encode("utf-8")).hexdigest()[:20]
-            results.append(
-                {
+            fit_reasons = [str(value) for value in scored.get("fit_axis", {}).get("reasons", []) if str(value).strip()]
+            strategy_reasons = [str(value) for value in scored.get("strategy_axis", {}).get("reasons", []) if str(value).strip()]
+            rule_reason = "；".join([*fit_reasons, *strategy_reasons][:4])
+            old_ai_reason = str(assessment.get("reason_cn", "")).strip()[:320] if isinstance(assessment, dict) else ""
+            row = {
                     "result_id": result_id,
                     "journal_id": str(journal.get("id", result_id)),
                     "journal_name": str(journal.get("name", "")),
                     "journal": deepcopy(journal),
-                    "ai_total_score": fit_score,
-                    "total_score": fit_score,
+                    "fit_axis": deepcopy(scored.get("fit_axis", {})),
+                    "strategy_axis": deepcopy(scored.get("strategy_axis", {})),
+                    "fit_score": fit_score,
+                    "strategy_score": strategy_score,
+                    "ai_total_score": int(scored.get("total_score", 0) or 0),
+                    "total_score": int(scored.get("total_score", 0) or 0),
                     "ranking_score": ranking_score,
-                    "reason_cn": str(assessment.get("reason_cn", "")).strip()[:320] or "主题契合度达到所选最低线。",
+                    "tier": str(scored.get("tier", "")),
+                    "evidence_coverage": float(scored.get("evidence_coverage", 0) or 0),
+                    "recommendation_state": str(scored.get("recommendation_state", "preliminary")),
+                    "constraint_state": str(scored.get("constraint_state", "eligible")),
+                    "scoring_version": str(scored.get("scoring_version", "")),
+                    "policy_version": str(scored.get("policy_version", "")),
+                    "reason_cn": rule_reason or old_ai_reason or "规则双轴已完成；当前证据仍需继续补全。",
                     "publisher": str(journal.get("publisher", "")),
                     "fee_mode": _fee_modes_for_journal(journal)[0],
                     "fee_matches": sorted(fee_matches),
@@ -1026,10 +1311,20 @@ def run_selection_rounds(
                     "similar_papers": deepcopy(journal.get("similar_papers", [])),
                     "verified_at": str(journal.get("verified_at", "")),
                     "easyscholar_configured": ready,
+                    "ai_scoring_available": bool(
+                        scored.get("fit_axis", {}).get("ai_adjustment") is not None
+                        or scored.get("strategy_axis", {}).get("ai_adjustment") is not None
+                    ),
                     "is_external": not bool(journal.get("local_library_evidence")),
                 }
-            )
-            growth += 1
+            if scored.get("tier"):
+                row["candidate_state"] = "visible"
+                results.append(row)
+                growth += 1
+            else:
+                row["candidate_state"] = "retained_unshown"
+                row["display_reason"] = "below_dynamic_pyramid"
+                retained_candidates.append(row)
         if growth == 0:
             no_growth += 1
         else:
@@ -1039,20 +1334,26 @@ def run_selection_rounds(
             break
     results.sort(
         key=lambda item: (
+            0 if str(item.get("constraint_state", "eligible")) == "eligible" else 1,
+            {"冲刺": 0, "主投": 1, "稳妥": 2, "探索": 3}.get(str(item.get("tier", "")), 4),
             -int(item.get("ranking_score", 0)),
-            -int(item.get("ai_total_score", 0)),
+            -int(item.get("fit_score", 0)),
             canonical_text(item.get("journal_name", "")),
         )
     )
-    emit(f"选刊完成：共保留 {len(results)} 本满足全部硬条件的期刊。", 100)
+    emit(f"选刊完成：共保留 {len(results)} 本候选，并按双轴形成动态金字塔。", 100)
     return {
         "results": results,
+        "retained_candidates": retained_candidates,
         "searched_keys": sorted(searched),
         "rejected_counts": rejected_counts,
         "rounds": rounds_completed,
         "stop_reason": stop_reason,
         "similar_work_count": len(similar_works),
         "verification_configured": ready,
+        "ai_scoring_mode": "rules_plus_ai" if any(value.get("ai_scoring_available") for value in results) else "rules_normalized",
+        "ai_errors": _aggregate_selection_ai_errors(ai_errors),
+        "ai_failed_batches": len(ai_errors),
     }
 
 
@@ -1642,4 +1943,3 @@ def canonical_journal_name(value: Any) -> str:
     text = canonical_text(value).replace("&", " and ")
     text = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE)
     return " ".join(text.split())
-

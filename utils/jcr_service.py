@@ -14,7 +14,9 @@ from datetime import date
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import Request
+
+from utils.api_rate_limit import rate_limited_urlopen as urlopen
 
 from utils.file_manager import load_app_settings
 from utils.secure_store import SecretStoreError, reveal_secret

@@ -9,13 +9,13 @@ from unittest import TestCase
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QFrame, QToolButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QFrame
 
 from tests import _data_root  # noqa: F401 - isolate persistence before UI imports
 from ui.home_page import HomePage, today_next_actions
 from ui.main_window import MainWindow
 from ui.paper_page import JournalHistoryRow, PaperPage
-from ui.theme import THEME_REGISTRY, apply_application_theme
+from ui.theme import SECTION_ACCENTS, THEME_REGISTRY, apply_application_theme
 from ui.todo_page import TodoPage
 from ui.workbench_shell import resolve_route
 from utils.file_manager import save_papers, save_todos
@@ -35,8 +35,9 @@ class V111RefinementContracts(TestCase):
         self.assertIs(changed, False)
         self.assertEqual(self.application.styleSheet(), before)
 
-    def test_theme_picker_offers_contrasting_non_monochrome_palettes(self) -> None:
-        self.assertTrue({"cinnabar_paper", "violet_grove", "night_coral"}.issubset(THEME_REGISTRY))
+    def test_single_theme_uses_contrasting_section_accents(self) -> None:
+        self.assertEqual(set(THEME_REGISTRY), {"fog_teal"})
+        self.assertGreaterEqual(len(set(SECTION_ACCENTS.values())), 8)
 
     def test_unchanged_settings_save_skips_expensive_window_reconfiguration(self) -> None:
         window = MainWindow()
@@ -133,10 +134,10 @@ class V111RefinementContracts(TestCase):
         self.assertIn("优先级", priority_button.toolTip())
         page.close()
 
-    def test_rejection_archive_is_a_corner_control_not_a_full_width_panel(self) -> None:
+    def test_rejection_archive_is_in_the_header_overflow_not_a_full_width_panel(self) -> None:
         page = PaperPage()
 
-        self.assertIsNotNone(page.findChild(QToolButton, "archiveCornerButton"))
+        self.assertTrue(any("拒稿归档" in action.text() for action in page.archive_menu_action.parent().actions()))
         self.assertIsNone(page.findChild(QFrame, "rejectionArchiveFrame"))
         page.close()
 

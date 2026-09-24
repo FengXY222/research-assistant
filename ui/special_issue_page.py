@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime, time
 from typing import Callable
 
+from ui.page_kit import ElidedLabel, PageHeader
+
 from PySide6.QtCore import QSize, QThread, Qt, Signal
 from PySide6.QtGui import QFontMetrics, QMouseEvent
 from PySide6.QtWidgets import (
@@ -18,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from utils.special_issue_repository import load_special_issue_store
+from utils.special_issue_repository import load_special_issue_overview
 from utils.special_issue_service import refresh_special_issues, special_issue_refresh_due
 from utils.journal_quality import compact_cas_quartile, journal_quality_snapshot
 from utils.special_issue_policy import evaluate_special_issue, is_read, is_saved
@@ -46,31 +48,6 @@ class SpecialIssueRefreshThread(QThread):
         self.completed.emit(result)
 
 
-class _ElidedLabel(QLabel):
-    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._full_text = ""
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.setMinimumWidth(0)
-        self.setText(text)
-
-    def setText(self, text: str) -> None:  # noqa: N802 - Qt API
-        self._full_text = str(text or "")
-        self.setToolTip(self._full_text)
-        self._refresh_text()
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt API
-        super().resizeEvent(event)
-        self._refresh_text()
-
-    def _refresh_text(self) -> None:
-        width = max(20, self.contentsRect().width())
-        QLabel.setText(self, QFontMetrics(self.font()).elidedText(self._full_text, Qt.TextElideMode.ElideRight, width))
-
-    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt API
-        return QSize(0, super().minimumSizeHint().height())
-
-
 class SpecialIssuePreviewRow(QFrame):
     clicked = Signal(str)
 
@@ -86,15 +63,28 @@ class SpecialIssuePreviewRow(QFrame):
         root.setSpacing(2)
         heading = QHBoxLayout()
         heading.setSpacing(6)
-        title = _ElidedLabel(str(item.get("title", "未命名特刊")))
+        title = ElidedLabel(str(item.get("title", "未命名特刊")))
         title.setObjectName("specialIssuePreviewTitle")
         title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         heading.addWidget(title, 1)
-        score = int((item.get("match") or {}).get("score", 0) or 0)
-        score_label = QLabel(f"{score}")
+        is_v13 = str(item.get("scoring_version", "")).startswith("special-issue-dual-axis-13")
+        if is_v13:
+            relevance = int(item.get("relevance_score", 0) or 0)
+            opportunity = int(item.get("opportunity_score", 0) or 0)
+            level = str(item.get("pyramid_level", ""))
+            relevance_axis = item.get("relevance_axis", {}) if isinstance(item.get("relevance_axis"), dict) else {}
+            opportunity_axis = item.get("opportunity_axis", {}) if isinstance(item.get("opportunity_axis"), dict) else {}
+            ai_used = relevance_axis.get("ai_adjustment") is not None or opportunity_axis.get("ai_adjustment") is not None
+            score_text = f"{level} · 相关{relevance} / 机会{opportunity}" if level else f"相关{relevance} / 机会{opportunity}"
+            score_label_tip = "AI 已参与双轴评分" if ai_used else "AI 未参与，本条按规则评分"
+        else:
+            score_text = str(int((item.get("match") or {}).get("score", 0) or 0))
+            score_label_tip = "旧版匹配分"
+        score_label = QLabel(score_text)
         score_label.setObjectName("specialIssuePreviewScore")
+        score_label.setToolTip(score_label_tip)
         score_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        score_label.setFixedWidth(28)
+        score_label.setFixedWidth(132 if is_v13 else 28)
         heading.addWidget(score_label)
         root.addLayout(heading)
         journal = str(item.get("journal", "未知期刊")).strip() or "未知期刊"
@@ -109,7 +99,7 @@ class SpecialIssuePreviewRow(QFrame):
         )
         jcr = str(quality.get("jcr_quartile", "")).strip()
         cas = compact_cas_quartile(quality.get("cas_upgrade", "") or quality.get("cas_basic", ""))
-        meta = _ElidedLabel(
+        meta = ElidedLabel(
             " · ".join(
                 value
                 for value in (
@@ -154,27 +144,29 @@ class SpecialIssuePage(QWidget):
         self.preview_issue_ids: list[str] = []
         self.preview_rows: list[SpecialIssuePreviewRow] = []
         self._refresh_worker: SpecialIssueRefreshThread | None = None
+        self._loaded = False
         self._build_ui()
-        self.reload()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().showEvent(event)
+        if not self._loaded:
+            self.reload()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 8, 10, 9)
         root.setSpacing(7)
-        header = QHBoxLayout()
-        header.setSpacing(6)
-        title = QLabel("特刊征稿")
-        title.setObjectName("specialIssuePageTitle")
-        header.addWidget(title)
-        subtitle = QLabel("匹配、核验与截止管理")
-        subtitle.setObjectName("specialIssuePageSubtitle")
-        header.addWidget(subtitle)
-        header.addStretch(1)
-        self.refresh_status = _ElidedLabel("")
-        self.refresh_status.setObjectName("specialIssueRefreshStatus")
-        self.refresh_status.setMaximumWidth(142)
-        header.addWidget(self.refresh_status)
-        root.addLayout(header)
+        header = PageHeader("特刊征稿", accent="special_issues")
+        self.refresh_status = header.hint_label
+        self.open_button = header.add_primary_action(
+            "打开特刊工作台",
+            lambda: self.open_workbench.emit(""),
+            tooltip="打开完整特刊征稿工作台",
+        )
+        self.open_button.setObjectName("specialIssueOpenWorkbench")
+        self.open_button.setProperty("accent", "special_issues")
+        self.open_button.setMinimumHeight(28)
+        root.addWidget(header)
 
         summary = QFrame()
         summary.setObjectName("specialIssueSummary")
@@ -199,12 +191,6 @@ class SpecialIssuePage(QWidget):
         scroll.setWidget(self.preview_host)
         root.addWidget(scroll, 1)
 
-        self.open_button = QPushButton("打开特刊工作台")
-        self.open_button.setObjectName("specialIssueOpenWorkbench")
-        self.open_button.setToolTip("打开完整特刊征稿工作台")
-        self.open_button.setMinimumHeight(30)
-        self.open_button.clicked.connect(lambda: self.open_workbench.emit(""))
-        root.addWidget(self.open_button)
 
     @staticmethod
     def _metric(layout: QHBoxLayout, label: str, object_name: str, *, stretch: int = 1) -> QLabel:
@@ -226,9 +212,10 @@ class SpecialIssuePage(QWidget):
 
     def reload(self) -> None:
         try:
-            store = load_special_issue_store()
+            store = load_special_issue_overview()
         except Exception:
             store = {"items": []}
+        self._loaded = True
         items = [value for value in store.get("items", []) if isinstance(value, dict)]
         now = datetime.combine(self._today_provider(), time(hour=12))
         saved = [value for value in items if evaluate_special_issue(value, now=now, view="saved")["visible"]]
@@ -244,7 +231,7 @@ class SpecialIssuePage(QWidget):
         self.unread_value.setText(str(unread))
         self.saved_value.setText(str(len(saved)))
         self.deadline_value.setText(self._nearest_deadline_text([*saved, *recommended]))
-        self._rebuild_preview(saved[:2], recommended[:3])
+        self._rebuild_preview(saved, recommended)
 
     def is_refresh_running(self) -> bool:
         return self._refresh_worker is not None and self._refresh_worker.isRunning()
@@ -252,7 +239,7 @@ class SpecialIssuePage(QWidget):
     def start_refresh(self, *, force: bool = False) -> bool:
         if self.is_refresh_running():
             return False
-        store = load_special_issue_store()
+        store = load_special_issue_overview()
         if not force:
             from datetime import datetime
 
@@ -287,8 +274,12 @@ class SpecialIssuePage(QWidget):
         stats = result.get("stats", {}) if isinstance(result, dict) else {}
         store = result.get("store", {}) if isinstance(result, dict) else {}
         status = str(store.get("last_refresh_status", "success"))
+        summary = (
+            f"现有 {int(stats.get('items', 0) or 0)} 条，"
+            f"其中 {int(stats.get('eligible', 0) or 0)} 条符合条件"
+        )
         self.refresh_status.setText(
-            "已取消" if status == "cancelled" else "部分完成" if status == "partial" else f"已更新 {int(stats.get('items', 0) or 0)} 条"
+            "已取消" if status == "cancelled" else f"部分完成 · {summary}" if status == "partial" else summary
         )
         self.reload()
         self.changed.emit()
@@ -325,7 +316,7 @@ class SpecialIssuePage(QWidget):
         self.preview_issue_ids = []
         self.preview_rows = []
         self._add_section("已收藏", saved, "specialIssueSavedList")
-        self._add_section("高匹配", recommended, "specialIssueRecommendedList")
+        self._add_section("符合条件", recommended, "specialIssueRecommendedList")
         if not saved and not recommended:
             empty = QLabel("暂时没有达到推送门槛的特刊")
             empty.setObjectName("specialIssueEmpty")

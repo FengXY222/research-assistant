@@ -23,6 +23,10 @@ _VENDORED_ICONS = frozenset(
         "x",
         "chevron-down",
         "external-link",
+        "home",
+        "list-todo",
+        "file-text",
+        "library-big",
     }
 )
 

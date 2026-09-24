@@ -32,7 +32,6 @@ from ui.theme import apply_dialog_theme
 from utils.ai_service import (
     DeepSeekConfigurationError,
     DeepSeekRequestError,
-    is_deepseek_ready,
 )
 from utils.evidence_cache import EvidenceCache
 from utils.file_manager import (
@@ -50,7 +49,7 @@ from utils.journal_selection_service import (
 
 
 class JournalSelectionAiThread(QThread):
-    """Run one deliberate AI recommendation without blocking the workbench."""
+    """Run selection without blocking; AI is an optional bounded scorer."""
 
     completed = Signal(dict)
     failed = Signal(str)
@@ -91,7 +90,7 @@ class JournalSelectionAiThread(QThread):
         except (DeepSeekConfigurationError, DeepSeekRequestError) as error:
             self.failed.emit(str(error))
         except Exception:  # noqa: BLE001 - local choices must survive provider errors
-            self.failed.emit("AI 主推荐未完成，请稍后重试；已保留本地预览。")
+            self.failed.emit("选刊未完成，请稍后重试；已有论文和期刊资料均已保留。")
 
 
 class MultiSelectComboBox(QPushButton):
@@ -213,13 +212,19 @@ class RecommendationRow(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
         self.title_label.setCursor(Qt.CursorShape.IBeamCursor)
-        self.score_label = QLabel(f"AI 总分\n{int(candidate.get('ai_total_score', candidate.get('total_score', 0)) or 0)}")
+        is_v13 = str(candidate.get("scoring_version", "")).startswith("journal-selection-dual-axis-13")
+        if is_v13:
+            tier = str(candidate.get("tier", "")) or "待补证据"
+            score_text = f"{tier}\n契合 {int(candidate.get('fit_score', 0) or 0)} · 策略 {int(candidate.get('strategy_score', 0) or 0)}"
+        else:
+            score_text = f"AI 总分\n{int(candidate.get('ai_total_score', candidate.get('total_score', 0)) or 0)}"
+        self.score_label = QLabel(score_text)
         self.score_label.setObjectName("selectionRowScore")
         self.score_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
-        self.score_label.setMinimumWidth(78)
-        self.score_label.setMaximumWidth(86)
+        self.score_label.setMinimumWidth(78 if not is_v13 else 136)
+        self.score_label.setMaximumWidth(86 if not is_v13 else 150)
         self.score_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
-        self.reason_label = WrappingRecommendationLabel("推荐理由 · " + (str(candidate.get("reason_cn", "")).strip() or "本地筛选结果，等待 AI 结合摘要复核。"))
+        self.reason_label = WrappingRecommendationLabel("推荐理由 · " + (str(candidate.get("reason_cn", "")).strip() or "已按本地证据完成规则双轴评分。"))
         self.reason_label.setObjectName("selectionRowReason")
         self.reason_label.setWordWrap(True)
         self.reason_label.setMinimumWidth(0)
@@ -378,7 +383,12 @@ class RecommendationRow(QWidget):
             except (TypeError, ValueError):
                 low = high = 0
             speed = f"预计 {low}-{high} 天" if low and high else "预计速度待核验"
-        return " · ".join((publisher, metric, fee_text, speed))
+        prefix: tuple[str, ...] = ()
+        if str(candidate.get("scoring_version", "")).startswith("journal-selection-dual-axis-13"):
+            coverage = round(float(candidate.get("evidence_coverage", 0) or 0) * 100)
+            state = "完整分层" if str(candidate.get("recommendation_state", "")) == "full" else "初步候选"
+            prefix = (f"{state} · 覆盖率 {coverage}%",)
+        return " · ".join((*prefix, publisher, metric, fee_text, speed))
 
     @staticmethod
     def _evidence_text(candidate: dict[str, Any]) -> str:
@@ -479,7 +489,7 @@ class JournalSelectionDialog(QDialog):
         controls_layout.setContentsMargins(1, 1, 4, 1)
         controls_layout.setSpacing(8)
 
-        self.ai_status = QLabel("已拒稿、身份、出版社、已配置分区和主题最低线是硬条件；费用与时效只参与排序。")
+        self.ai_status = QLabel("默认只排除停刊、文章类型不接收、重复和你明确永久排除的期刊；其余按证据逐级分层。")
         self.ai_status.setObjectName("selectionAiStatus")
         self.ai_status.setWordWrap(True)
         controls_layout.addWidget(self.ai_status)
@@ -554,7 +564,7 @@ class JournalSelectionDialog(QDialog):
         self.fee_combo.addItem("不付费", "no_fee")
         self.fee_combo.addItem("付费", "paid")
         self._set_combo_data(self.fee_combo, self._constraints["fee_modes"][0] if self._constraints["fee_modes"] else "")
-        self.jcr_quartile_combo = MultiSelectComboBox("JCR 不限", [(f"Q{number}", f"Q{number}") for number in range(1, 5)])
+        self.jcr_quartile_combo = MultiSelectComboBox("JCR Q1/Q2 不限", [(f"Q{number}", f"Q{number}") for number in range(1, 3)])
         self.jcr_quartile_combo.setObjectName("selectionJcrMulti")
         self.jcr_quartile_combo.set_checked_values(self._constraints["jcr_quartiles"])
         self.cas_quartile_combo = MultiSelectComboBox("中科院不限", [(f"{number}区", str(number)) for number in range(1, 5)])
@@ -578,9 +588,9 @@ class JournalSelectionDialog(QDialog):
         self._set_combo_data(self.speed_priority, self._constraints["speed_priority"])
         self.fit_strictness = QComboBox()
         self.fit_strictness.setObjectName("selectionFitStrictness")
-        self.fit_strictness.addItem("宽松 · 55分", "lenient")
-        self.fit_strictness.addItem("均衡 · 65分", "balanced")
-        self.fit_strictness.addItem("严格 · 75分", "strict")
+        self.fit_strictness.addItem("宽范围探索", "lenient")
+        self.fit_strictness.addItem("均衡排序", "balanced")
+        self.fit_strictness.addItem("聚焦高契合", "strict")
         self._set_combo_data(self.fit_strictness, self._constraints["fit_strictness"])
         self.filter_q34 = QCheckBox("过滤已知 Q3/Q4")
         self.filter_q34.setChecked(self._constraints["filter_known_q3_q4"])
@@ -594,7 +604,7 @@ class JournalSelectionDialog(QDialog):
             ("出版社", self.publisher_combo),
             ("费用", self.fee_combo),
             ("发表时效", self.speed_priority),
-            ("主题最低线", self.fit_strictness),
+            ("候选范围", self.fit_strictness),
             ("JCR 分区", self.jcr_quartile_combo),
             ("中科院分区", self.cas_quartile_combo),
         ]
@@ -659,9 +669,9 @@ class JournalSelectionDialog(QDialog):
         self.quick_import_button.setToolTip("保存到期刊库，保留为待核验资料。")
         self.quick_import_button.clicked.connect(self._quick_import)
         self.quick_import_button.hide()
-        self.ai_button = QPushButton("开始 AI 选刊")
+        self.ai_button = QPushButton("开始选刊")
         self.ai_button.setObjectName("selectionStartButton")
-        self.ai_button.setToolTip("按出版社与分区硬条件多轮发现期刊，并用 EasyScholar 核验分区。")
+        self.ai_button.setToolTip("从相似论文与期刊库召回候选；AI 未配置时仍按规则双轴完成选刊。")
         self.ai_button.clicked.connect(self._run_ai_recommendation)
         self.add_button = QPushButton("加入投稿路径")
         self.add_button.setObjectName("primaryButton")
@@ -832,7 +842,7 @@ class JournalSelectionDialog(QDialog):
             if candidate_key == preferred_id:
                 selected_row = index
         self.candidate_list.blockSignals(False)
-        self.candidate_heading.setText(f"AI 推荐结果 · {len(self._candidates)} 本" if self._ai_result else "AI 推荐结果")
+        self.candidate_heading.setText(f"动态选刊金字塔 · {len(self._candidates)} 本" if self._ai_result else "动态选刊金字塔")
         has_results = bool(self.candidate_list.count())
         self.candidate_list.setVisible(has_results)
         self.empty_results_label.setVisible(not has_results)
@@ -897,8 +907,8 @@ class JournalSelectionDialog(QDialog):
         if not candidate:
             self.detail_title.setText("没有符合当前条件的期刊")
             self.selection_metric_line.setText("指标待核验")
-            self.score_equation.setText("尚未开始 AI 选刊")
-            self.detail_body.setText("先确认筛选条件，再开始多轮 AI 选刊。")
+            self.score_equation.setText("尚未开始选刊")
+            self.detail_body.setText("先确认筛选条件，再开始召回、核验与双轴评分。")
             self.quick_import_button.hide()
             self.add_button.setEnabled(False)
             return
@@ -907,7 +917,23 @@ class JournalSelectionDialog(QDialog):
         quality = journal_quality_snapshot(candidate.get("journal", {}) if isinstance(candidate.get("journal", {}), dict) else {})
         metric_line = str(quality.get("metric_line", "")).strip()
         self.selection_metric_line.setText(metric_line or "指标待核验")
-        self.score_equation.setText(f"AI 总分 {int(candidate.get('ai_total_score', candidate.get('total_score', 0)) or 0)}")
+        if str(candidate.get("scoring_version", "")).startswith("journal-selection-dual-axis-13"):
+            fit_axis = candidate.get("fit_axis", {}) if isinstance(candidate.get("fit_axis"), dict) else {}
+            strategy_axis = candidate.get("strategy_axis", {}) if isinstance(candidate.get("strategy_axis"), dict) else {}
+            def axis_text(label: str, axis: dict[str, Any]) -> str:
+                base = int(axis.get("base_score", 0) or 0)
+                total = int(axis.get("total", 0) or 0)
+                ai = axis.get("ai_adjustment")
+                return f"{label} {total}（基础 {base}/66，按规则归一化）" if ai is None else f"{label} {total}（基础 {base}/66，AI +{int(ai)}/34）"
+            self.score_equation.setText(
+                f"{str(candidate.get('tier', '')) or '待补证据'} · "
+                + axis_text("契合", fit_axis)
+                + " · "
+                + axis_text("策略", strategy_axis)
+                + f" · 信息覆盖率 {round(float(candidate.get('evidence_coverage', 0) or 0) * 100)}%"
+            )
+        else:
+            self.score_equation.setText(f"AI 总分 {int(candidate.get('ai_total_score', candidate.get('total_score', 0)) or 0)}")
         details = ["推荐理由\n" + (str(candidate.get("reason_cn", "")).strip() or "本地筛选结果，等待 AI 结合摘要复核。")]
         if external:
             details.append("AI 扩展候选：已完成 EasyScholar 分区核验；投稿前仍请以期刊官网的费用和时效说明为准。" if metric_line else "AI 扩展候选：JCR、OA 与处理周期均待核验。")
@@ -1008,21 +1034,15 @@ class JournalSelectionDialog(QDialog):
             self.ai_progress.update("AI 正在分轮寻找并核验期刊，请稍候。", self.selection_progress.value())
             return
         # Surface feedback before readiness checks so a click can never look
-        # like a no-op, even when the provider is not configured.
-        self.ai_progress.begin("正在检查 AI 配置…")
+        # Rules and source-backed facts remain sufficient when AI is absent.
+        self.ai_progress.begin("正在准备选刊…")
         self.ai_button.setEnabled(False)
-        self.ai_button.setText("AI 选刊中…")
-        if not is_deepseek_ready("journal_recommendation"):
-            self.ai_status.setText("AI 尚未配置：请在设置中配置 AI 后再开始选刊。")
-            self.ai_progress.fail("AI 尚未配置，未开始联网选刊。")
-            self.ai_button.setText("开始 AI 选刊")
-            self.ai_button.setEnabled(bool(self._selected_paper()))
-            return
+        self.ai_button.setText("选刊中…")
         paper = self._selected_paper()
         if not paper:
-            self.ai_status.setText("请选择论文后再运行 AI 主推荐。")
-            self.ai_progress.fail("请选择论文后再运行 AI 主推荐。")
-            self.ai_button.setText("开始 AI 选刊")
+            self.ai_status.setText("请选择论文后再开始选刊。")
+            self.ai_progress.fail("请选择论文后再开始选刊。")
+            self.ai_button.setText("开始选刊")
             self.ai_button.setEnabled(False)
             return
         self.add_button.setEnabled(False)
@@ -1045,7 +1065,7 @@ class JournalSelectionDialog(QDialog):
         self.ai_status.setText(str(message))
 
     def _ai_recommendation_finished(self, result: dict[str, Any]) -> None:
-        self.ai_progress.complete("AI 正在收尾并整理结果…")
+        self.ai_progress.complete("正在整理双轴分层结果…")
         error = str(result.get("error_cn", "")).strip() if isinstance(result, dict) else ""
         self.apply_ai_recommendation(result)
         if error:
@@ -1058,25 +1078,26 @@ class JournalSelectionDialog(QDialog):
             ai_count = 0
         verification_mode = str(result.get("verification_mode", "")).strip().casefold()
         if verification_mode == "skipped":
-            message = f"选刊完成：保留 {ai_count} 本候选；期刊身份已核验，未配置 EasyScholar，因此没有执行分区硬筛。"
+            message = f"选刊完成：保留 {ai_count} 本候选；未配置 EasyScholar 的分区信息保持待核实，不按 0 分或失败处理。"
         elif ai_count:
-            message = f"选刊完成：{ai_count} 本期刊通过身份、出版社、分区和主题最低线。"
+            mode = str(result.get("ai_scoring_mode", "rules_normalized"))
+            message = f"选刊完成：{ai_count} 本候选已形成动态金字塔；" + ("AI 已按每轴最多 34 分参与。" if mode == "rules_plus_ai" else "本次按规则归一化评分。")
         else:
-            message = "本轮没有期刊通过全部硬条件：身份、出版社、分区和主题最低线。可放宽一个条件后重试。"
+            message = "本轮没有召回到可核验候选；可以补充摘要、关键词或稍后重试数据源。"
         if fallback:
             message += " " + fallback
         self.ai_status.setText(message)
 
     def _ai_recommendation_failed(self, message: str) -> None:
-        self.ai_progress.fail("AI 选刊未完成：" + str(message))
-        self.ai_status.setText("AI 选刊未完成：" + str(message))
+        self.ai_progress.fail("选刊未完成：" + str(message))
+        self.ai_status.setText("选刊未完成：" + str(message))
 
     def _clear_ai_worker(self) -> None:
         if self._ai_worker is not None:
             self._ai_worker.deleteLater()
         self._ai_worker = None
         self.ai_button.setEnabled(bool(self._selected_paper()))
-        self.ai_button.setText("开始 AI 选刊")
+        self.ai_button.setText("开始选刊")
 
     def _emit_action(self, action: str) -> None:
         candidate = self._current_candidate()

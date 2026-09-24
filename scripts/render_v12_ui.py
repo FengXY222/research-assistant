@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -389,7 +390,25 @@ def render(output: Path) -> dict[str, Any]:
     widget.settings["frontier_background_refresh"] = False
     workbench = FrontierSettingsDialog(PROFILE_FIXTURE)
     frontier = DailyFrontierPage()
-    frontier.data = json.loads(json.dumps(FRONTIER_FIXTURE, ensure_ascii=False))
+    frontier_fixture = json.loads(json.dumps(FRONTIER_FIXTURE, ensure_ascii=False))
+    frontier_fixture["algorithm_version"] = 13
+    for index, item in enumerate(frontier_fixture["items"]):
+        if item.get("quality_gate_state") == "withheld":
+            continue
+        relevance = max(62, int(item.get("score", 80) or 80) - 4)
+        value = max(60, int(item.get("score", 80) or 80) - 7)
+        item.update(
+            content_decision="accept",
+            admission_version="frontier-v13",
+            candidate_state="visible",
+            relevance_score=relevance,
+            research_value_score=value,
+            relevance_axis={"base_score": min(66, relevance), "ai_adjustment": max(0, relevance - 66)},
+            value_axis={"base_score": min(66, value), "ai_adjustment": max(0, value - 66)},
+            pyramid_level="A" if index == 0 else "B",
+            display_bucket="today",
+        )
+    frontier.data = frontier_fixture
     frontier.resize(480, 720)
     frontier._render()
     selection = JournalSelectionDialog([SELECTION_PAPER], [], PROFILE_FIXTURE)
@@ -397,9 +416,19 @@ def render(output: Path) -> dict[str, Any]:
         {"results": [_selection_result(index) for index in range(1, 4)], "rounds": 3}
     )
     special_page = SpecialIssuePage()
+    special_items = json.loads(json.dumps(SPECIAL_ISSUE_ITEMS, ensure_ascii=False))
+    for item in special_items:
+        item.update(scope_is_complete=True, call_status="open", official_checked_at=datetime.now().isoformat(timespec="seconds"))
+        item["match"] = {
+            **item.get("match", {}),
+            "rank_score": item.get("match", {}).get("score", 80),
+            "content_qualified": True,
+            "relation": "core",
+        }
+    special_store = {**SPECIAL_ISSUE_STORE, "items": special_items}
     special_dialog = SpecialIssueDialog(
-        SPECIAL_ISSUE_STORE,
-        SPECIAL_ISSUE_ITEMS,
+        special_store,
+        special_items,
         [SELECTION_PAPER],
         selected_issue_id="special-recommended",
     )
@@ -453,10 +482,10 @@ def render(output: Path) -> dict[str, Any]:
         entries.append(_capture(app, special_dialog, output / f"{theme_id}-special-error-1024x768.png"))
 
         apply_application_theme(app, theme_id, "compact")
-        frontier._switch_stream("journal")
-        entries.append(_capture(app, frontier, output / f"{theme_id}-frontier-journal-480x720.png", hide_after=False))
-        frontier._switch_stream("preprint")
-        entries.append(_capture(app, frontier, output / f"{theme_id}-frontier-preprint-480x720.png"))
+        frontier._select_view("今日推荐")
+        entries.append(_capture(app, frontier, output / f"{theme_id}-frontier-today-480x720.png", hide_after=False))
+        frontier._select_view("全部记录")
+        entries.append(_capture(app, frontier, output / f"{theme_id}-frontier-all-480x720.png"))
         for width, height in ((400, 480), (480, 720)):
             special_page.resize(width, height)
             entries.append(_capture(app, special_page, output / f"{theme_id}-special-widget-{width}x{height}.png"))

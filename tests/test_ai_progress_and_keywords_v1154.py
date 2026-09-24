@@ -76,9 +76,10 @@ class AiProgressAndKeywordTests(TestCase):
         )
         dialog.show()
         self.application.processEvents()
-        with patch("ui.journal_selection_dialog.is_deepseek_ready", return_value=False):
+        with patch("ui.journal_selection_dialog.JournalSelectionAiThread.start") as start:
             dialog._run_ai_recommendation()
         self.assertTrue(dialog.ai_progress.isVisible())
-        self.assertIn("尚未配置", dialog.ai_status.text())
-        self.assertEqual(dialog.ai_button.text(), "开始 AI 选刊")
+        self.assertIn("正在准备论文", dialog.ai_status.text())
+        self.assertEqual(dialog.ai_button.text(), "选刊中…")
+        start.assert_called_once()
         dialog.close()
