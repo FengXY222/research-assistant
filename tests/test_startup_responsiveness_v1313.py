@@ -34,7 +34,8 @@ def test_daily_backup_is_deferred_to_idle_maintenance() -> None:
     constructor = main_window.split("class MainWindow", 1)[1].split("    def _build_ui", 1)[0]
     assert "maybe_create_daily_backup" not in entrypoint
     assert "class IdleBackupThread" in main_window
-    assert "maybe_create_daily_backup(self.settings)" in main_window
+    assert "maybe_create_daily_backup(" in main_window
+    assert "cancelled=self.isInterruptionRequested" in main_window
     assert "_maintenance_idle_timer" in constructor
     assert "maybe_create_daily_backup(self.settings)" not in constructor
 

@@ -88,7 +88,7 @@ def test_query_planner_reserves_authored_and_exploration_lanes():
 
 def test_refresh_calls_admission_and_does_not_push_rejected_candidates(tmp_path, monkeypatch):
     from utils import frontier_service as service
-    monkeypatch.setattr(service, "RESEARCH_INTELLIGENCE_CACHE_FILE", tmp_path / "cache.sqlite")
+    monkeypatch.setattr(service.file_manager, "RESEARCH_INTELLIGENCE_CACHE_FILE", tmp_path / "cache.sqlite")
     monkeypatch.setattr(service, "discover_frontier_candidates", lambda *a, **k: [item("good"), item("bad")])
     monkeypatch.setattr(service, "_enrich_frontier_quality_with_easyscholar", lambda items, *a, **k: items)
     assert hasattr(service, "review_frontier_content")
@@ -105,7 +105,7 @@ def test_refresh_calls_admission_and_does_not_push_rejected_candidates(tmp_path,
 
 def test_ai_failure_preserves_previously_approved_items(tmp_path, monkeypatch):
     from utils import frontier_service as service
-    monkeypatch.setattr(service, "RESEARCH_INTELLIGENCE_CACHE_FILE", tmp_path / "cache.sqlite")
+    monkeypatch.setattr(service.file_manager, "RESEARCH_INTELLIGENCE_CACHE_FILE", tmp_path / "cache.sqlite")
     monkeypatch.setattr(service, "discover_frontier_candidates", lambda *a, **k: [item("new")])
     monkeypatch.setattr(service, "_enrich_frontier_quality_with_easyscholar", lambda items, *a, **k: items)
     assert hasattr(service, "review_frontier_content")

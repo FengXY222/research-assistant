@@ -62,7 +62,7 @@ def _profile() -> dict:
 
 
 def test_release_and_six_source_six_lane_contract() -> None:
-    assert APP_VERSION == "13.1.3"
+    assert APP_VERSION == "13.1.9"
     core = {key for key, value in SOURCE_REGISTRY.items() if value.get("group") == "frontier_core"}
     assert core == {"openalex", "crossref", "semantic_scholar", "europe_pmc", "doaj", "arxiv"}
     assert set(RECALL_STRATEGIES) == {
@@ -536,6 +536,23 @@ def test_runtime_journal_keeps_only_the_payload_needed_for_resume() -> None:
         "payload" not in entry
         for entry in compact_runtime_store(store)["batches"][batch_id]["stages"].values()
     )
+
+
+def test_frontier_background_cancel_saves_resumable_checkpoint(monkeypatch) -> None:
+    saved: list[dict] = []
+    monkeypatch.setattr(file_manager, "load_v13_runtime", lambda: {})
+    monkeypatch.setattr(file_manager, "save_v13_runtime", lambda value: saved.append(value))
+
+    result = update_daily_frontier_v13(
+        {"profile": _profile(), "items": []},
+        [],
+        now=datetime(2026, 10, 1, 8),
+        cancelled=lambda: True,
+    )
+
+    assert result["cancelled"] is True
+    batch = saved[-1]["batches"][result["batch_id"]]
+    assert any(stage.get("state") == "cancelled" for stage in batch["stages"].values())
 
 
 def test_runtime_journal_is_not_copied_into_portable_backups() -> None:

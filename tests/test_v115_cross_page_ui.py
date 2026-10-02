@@ -125,10 +125,10 @@ class V115CrossPageUiTests(TestCase):
         page.show()
         self.application.processEvents()
 
-        row = page.scroll.widget().findChild(CompactJournalRow)
         self.assertLessEqual(page.minimumSizeHint().width(), 380)
-        self.assertLessEqual(page.scroll.widget().width(), page.scroll.viewport().width() + 1)
-        self.assertLessEqual(row.width(), page.scroll.viewport().width() + 1)
+        self.assertEqual(page.findChildren(CompactJournalRow), [])
+        self.assertGreater(page.journal_model.rowCount(), 0)
+        self.assertLessEqual(page.journal_view.viewport().width(), page.journal_view.width())
         self.assertEqual(page.scroll.horizontalScrollBar().maximum(), 0)
         page.close()
 

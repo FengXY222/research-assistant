@@ -34,7 +34,8 @@ from ui.dialogs import confirm_delete, show_undo_toast
 from ui.ai_progress import AiProgressPanel
 from ui.journal_selection_dialog import JournalSelectionDialog
 from ui.page_kit import PageHeader
-from ui.reorder import OrderDragHandle, ReorderableColumn
+from ui.reorder import OrderDragHandle
+from ui.virtual_cards import VirtualCardList
 from ui.workflow_dialogs import PaperActionCenterDialog
 from utils.ai_service import DeepSeekConfigurationError, fill_paper_record_with_ai, is_deepseek_ready
 from utils.file_manager import (
@@ -1240,7 +1241,6 @@ class PaperPage(QWidget):
         super().__init__(parent)
         self.papers = load_papers()
         self.rejection_archive = load_rejection_archive()
-        self._paper_cards: dict[str, PaperCard] = {}
         self._build_ui()
         self._render()
 
@@ -1306,16 +1306,10 @@ class PaperPage(QWidget):
         self.date_issue_frame.hide()
         root.addWidget(self.date_issue_frame)
 
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.content = ReorderableColumn("papers")
+        self.scroll = VirtualCardList(self._make_paper_card, self, height=230, scope="papers")
+        self.content = self.scroll.viewport()
         self.content.setObjectName("paperContent")
-        self.content.rows_layout.setContentsMargins(2, 2, 8, 10)
-        self.content.rows_layout.setSpacing(9)
-        self.content.order_changed.connect(self._reorder_papers)
-        self.scroll.setWidget(self.content)
+        self.scroll.order_changed.connect(self._reorder_papers)
         root.addWidget(self.scroll, 1)
 
     def _filtered(self) -> list[dict]:
@@ -1340,28 +1334,23 @@ class PaperPage(QWidget):
         return result
 
     def _render(self) -> None:
-        self.content.clear_rows()
-        self._paper_cards.clear()
         self._render_future_date_issues()
         self._render_archive()
         records = self._filtered()
         self.count_label.setText(f"共 {len(records)} 篇论文")
-        for paper in records:
-            card = PaperCard(paper)
-            card.action_requested.connect(self.open_action_center)
-            card.edit_requested.connect(self._edit_paper)
-            card.delete_requested.connect(self._delete_paper)
-            card.journal_edit_requested.connect(self._edit_journal)
-            card.journal_delete_requested.connect(self._delete_journal)
-            card.journal_timeline_requested.connect(self._show_journal_timeline)
-            self.content.add_row(card, str(paper.get("id", "")))
-            self._paper_cards[str(paper.get("id", ""))] = card
-
+        self.scroll.set_records(records)
         if not records:
-            empty = QLabel("没有找到论文记录。点击右上角，记录你的第一篇论文。")
-            empty.setObjectName("emptyLabel")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.content.set_placeholder(empty)
+            self.count_label.setText("没有找到论文记录。点击右上角记录第一篇论文。")
+
+    def _make_paper_card(self, paper):
+        card = PaperCard(paper)
+        card.action_requested.connect(self.open_action_center)
+        card.edit_requested.connect(self._edit_paper)
+        card.delete_requested.connect(self._delete_paper)
+        card.journal_edit_requested.connect(self._edit_journal)
+        card.journal_delete_requested.connect(self._delete_journal)
+        card.journal_timeline_requested.connect(self._show_journal_timeline)
+        return card
 
     def _render_future_date_issues(self) -> None:
         issues = find_future_paper_date_issues(self.papers)
@@ -1420,10 +1409,10 @@ class PaperPage(QWidget):
             self.filter_combo.setCurrentText("全部")
             self.filter_combo.blockSignals(False)
             self._render()
-        card = self._paper_cards.get(paper_id)
+        card = self.scroll.card_for_id(paper_id)
         if card is None:
             self._render()
-            card = self._paper_cards.get(paper_id)
+            card = self.scroll.card_for_id(paper_id)
         if card is None:
             return False
         card.expand_journals()

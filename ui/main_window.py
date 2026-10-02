@@ -4,6 +4,7 @@ import ctypes
 import importlib
 import os
 import sys
+import time
 from collections.abc import Callable
 from datetime import date, timedelta
 from uuid import uuid4
@@ -36,6 +37,7 @@ from ui.workbench_shell import WorkbenchShell, resolve_route
 from utils.app_info import APP_VERSION
 from utils.global_hotkey import GlobalHotkeyManager, VK_SPACE
 from utils.file_manager import (
+    append_runtime_log,
     load_app_settings,
     load_dismissed_reminders,
     load_reminder_state,
@@ -110,6 +112,7 @@ NAVIGATION_ITEMS = (
     ("work", "work", "工作", "list-todo"),
     ("papers", "papers", "论文", "file-text"),
     ("library", "library", "文献", "library-big"),
+    ("tools", "tools", "工具", "file-text"),
 )
 
 LEGACY_PAGE_ROUTES = {
@@ -130,14 +133,18 @@ LAZY_PAGE_TYPES = {
     "frontier": ("ui.frontier_page", "DailyFrontierPage"),
     "special_issues": ("ui.special_issue_page", "SpecialIssuePage"),
     "achievements": ("ui.achievements_page", "AchievementsPage"),
+    "tools": ("ui.tools_page", "ToolsPage"),
 }
 
 
 class LazyPagePlaceholder(QWidget):
     """Responsive stand-in while a page module is imported in the background."""
 
+    retry_requested = Signal()
+
     def __init__(self, label: str) -> None:
         super().__init__()
+        self.page_label = label
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.addStretch(1)
@@ -145,10 +152,21 @@ class LazyPagePlaceholder(QWidget):
         self.message.setObjectName("settingsHint")
         self.message.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.message)
+        self.retry_button = QPushButton("重试")
+        self.retry_button.setObjectName("secondaryButton")
+        self.retry_button.setFixedWidth(88)
+        self.retry_button.clicked.connect(lambda _checked=False: self.retry_requested.emit())
+        self.retry_button.hide()
+        layout.addWidget(self.retry_button, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addStretch(1)
 
-    def show_error(self, message: str) -> None:
+    def show_waiting(self, message: str) -> None:
+        self.message.setText(message)
+        self.retry_button.hide()
+
+    def show_error(self, message: str, *, retry: bool = True) -> None:
         self.message.setText(f"暂时无法打开：{message}")
+        self.retry_button.setVisible(retry)
 
 
 class PageImportThread(QThread):
@@ -183,10 +201,57 @@ class IdleBackupThread(QThread):
 
     def run(self) -> None:
         try:
-            maybe_create_daily_backup(self.settings)
+            maybe_create_daily_backup(
+                self.settings,
+                cancelled=self.isInterruptionRequested,
+            )
             self.completed.emit()
+        except InterruptedError:
+            return
         except Exception as error:  # noqa: BLE001 - backup failures must not close the app
             self.failed.emit(str(error))
+
+
+class IdleStorageMaintenanceThread(QThread):
+    """Prune and compact SQLite stores only after the application is idle."""
+
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            from utils import file_manager
+            from utils.database_maintenance import run_database_maintenance
+
+            result = run_database_maintenance(
+                file_manager.RESEARCH_INTELLIGENCE_CACHE_FILE,
+                file_manager.BUSINESS_DATA_FILE,
+                cancelled=self.isInterruptionRequested,
+            )
+            self.completed.emit(result)
+        except InterruptedError:
+            return
+        except Exception as error:  # noqa: BLE001 - maintenance cannot prevent normal use
+            self.failed.emit(str(error))
+
+
+class SpecialIssueActionThread(QThread):
+    """Run a potentially large cross-record action outside the GUI thread."""
+
+    completed = Signal()
+    failed = Signal(str)
+
+    def __init__(self, action: Callable[[], None], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._action = action
+
+    def run(self) -> None:
+        try:
+            self._action()
+        except Exception as error:  # noqa: BLE001 - report through the workbench
+            self.failed.emit(str(error))
+            return
+        self.completed.emit()
 
 
 class VerticalNavButton(QPushButton):
@@ -260,9 +325,14 @@ class MainWindow(QMainWindow):
         self._page_placeholders: dict[str, LazyPagePlaceholder] = {}
         self._page_loaders: dict[str, PageImportThread] = {}
         self._page_ready_callbacks: dict[str, list[Callable[[], None]]] = {}
+        self._page_load_started: dict[str, float] = {}
+        self._page_load_timers: dict[str, QTimer] = {}
+        self._sync_page_loads: set[str] = set()
         self._backup_thread: IdleBackupThread | None = None
+        self._storage_maintenance_thread: IdleStorageMaintenanceThread | None = None
         self._idle_tasks_running = False
         self._idle_task_queue: list[tuple[str, str]] = []
+        self._idle_background_workers: set[QThread] = set()
         self.application_mode = normalize_application_mode(self.settings.get("application_mode", "widget"))
         self.widget_locked = bool(self.settings["window"]["locked"])
         self.setWindowTitle("科研助手")
@@ -284,6 +354,7 @@ class MainWindow(QMainWindow):
         self._nav_buttons: list[QPushButton] = []
         self._reminder_dialog: QDialog | None = None
         self._special_issue_dialog: SpecialIssueDialog | None = None
+        self._special_action_thread: SpecialIssueActionThread | None = None
         self._sidebar_pinned = bool(self.settings.get("sidebar_pinned", False))
         self._sidebar_full_width = 82
         self._sidebar_hidden_width = 6
@@ -334,6 +405,29 @@ class MainWindow(QMainWindow):
         QApplication.instance().installEventFilter(self)
         self._schedule_idle_maintenance()
         QTimer.singleShot(0, self._run_initial_navigation_state)
+        self._save_failure_keys: tuple[str, ...] = ()
+        self._save_watch_timer = QTimer(self)
+        self._save_watch_timer.setInterval(1000)
+        self._save_watch_timer.timeout.connect(self._check_save_failures)
+        self._save_watch_timer.start()
+        self._shutdown_waiting = False
+        self._shutdown_ready = False
+
+    def _check_save_failures(self) -> None:
+        from utils.database_write_queue import WRITE_QUEUE
+
+        keys = tuple(WRITE_QUEUE.failures())
+        if keys and keys != self._save_failure_keys:
+            self.statusBar().showMessage("有内容保存失败，数据尚未落盘。请检查磁盘空间，点击重试保存。")
+            if not hasattr(self, "_retry_save_button"):
+                self._retry_save_button = QPushButton("重试保存", self)
+                self._retry_save_button.clicked.connect(WRITE_QUEUE.retry_failed)
+                self.statusBar().addPermanentWidget(self._retry_save_button)
+            self._retry_save_button.show()
+        elif not keys and self._save_failure_keys:
+            self.statusBar().clearMessage()
+            self._retry_save_button.hide()
+        self._save_failure_keys = keys
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -443,13 +537,19 @@ class MainWindow(QMainWindow):
             "frontier": "每日前沿",
             "special_issues": "特刊征稿",
             "achievements": "成果",
+            "tools": "工具",
         }
         for page_key, label in labels.items():
-            self._page_placeholders[page_key] = LazyPagePlaceholder(label)
+            placeholder = LazyPagePlaceholder(label)
+            placeholder.retry_requested.connect(
+                lambda key=page_key: self._retry_page_load(key)
+            )
+            self._page_placeholders[page_key] = placeholder
         self.workbench_shell = WorkbenchShell(
             {"home": self.home_page, **self._page_placeholders}
         )
         self.workbench_shell.setObjectName("contentStack")
+        self.workbench_shell.navigation_requested.connect(self.navigate)
         self.workbench_shell.set_mode(self.application_mode)
         self.home_page.open_todo.connect(lambda: self.navigate("todo"))
         self.home_page.open_papers.connect(lambda: self.navigate("papers"))
@@ -515,31 +615,84 @@ class MainWindow(QMainWindow):
             return
         if callback is not None:
             self._page_ready_callbacks.setdefault(page_key, []).append(callback)
-        if page_key in self._page_loaders:
+        existing_loader = self._page_loaders.get(page_key)
+        if existing_loader is not None and existing_loader.isRunning():
+            return
+        if existing_loader is not None:
+            self._page_loaders.pop(page_key, None)
+        if page_key in self._sync_page_loads:
+            return
+        self._page_load_started[page_key] = time.perf_counter()
+        append_runtime_log("lazy_page_requested", page=page_key)
+        placeholder = self._page_placeholders.get(page_key)
+        if placeholder is not None:
+            placeholder.show_waiting(f"正在准备{placeholder.page_label}…")
+        # The results page is small, but it previously depended on a worker
+        # signal that could finish silently and leave the placeholder forever.
+        # Keep it lazy, then create it on the GUI thread when first requested.
+        if page_key == "achievements":
+            self._sync_page_loads.add(page_key)
+            QTimer.singleShot(0, lambda key=page_key: self._load_page_sync_logged(key))
             return
         module_name, class_name = LAZY_PAGE_TYPES[page_key]
         loader = PageImportThread(page_key, module_name, class_name)
         loader.setParent(self)
         loader.ready.connect(self._page_import_ready)
         loader.failed.connect(self._page_import_failed)
+        loader.finished.connect(
+            lambda key=page_key, current=loader: self._page_import_finished(key, current)
+        )
         loader.finished.connect(loader.deleteLater)
         self._page_loaders[page_key] = loader
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(15 * 1000)
+        timer.timeout.connect(lambda key=page_key, current=loader: self._page_import_timeout(key, current))
+        self._page_load_timers[page_key] = timer
+        timer.start()
         loader.start(QThread.Priority.LowPriority)
+
+    def _load_page_sync_logged(self, page_key: str) -> None:
+        try:
+            self._ensure_page_sync(page_key)
+        except Exception as error:  # noqa: BLE001 - keep navigation available
+            self._sync_page_loads.discard(page_key)
+            self._page_import_failed(page_key, str(error))
+            return
+        self._sync_page_loads.discard(page_key)
+        elapsed_ms = int((time.perf_counter() - self._page_load_started.pop(page_key, time.perf_counter())) * 1000)
+        append_runtime_log("lazy_page_ready", page=page_key, duration_ms=elapsed_ms, mode="gui")
+        callbacks = self._page_ready_callbacks.pop(page_key, [])
+        for callback in callbacks:
+            QTimer.singleShot(0, callback)
 
     def _page_import_ready(self, page_key: str, page_type: object) -> None:
         self._page_loaders.pop(page_key, None)
+        self._stop_page_load_timer(page_key)
         try:
             self._install_loaded_page(page_key, page_type)
         except Exception as error:  # noqa: BLE001 - keep the rest of the shell usable
             self._page_import_failed(page_key, str(error))
             return
+        elapsed_ms = int((time.perf_counter() - self._page_load_started.pop(page_key, time.perf_counter())) * 1000)
+        append_runtime_log("lazy_page_ready", page=page_key, duration_ms=elapsed_ms, mode="worker-import")
         callbacks = self._page_ready_callbacks.pop(page_key, [])
         for callback in callbacks:
             QTimer.singleShot(0, callback)
 
     def _page_import_failed(self, page_key: str, message: str) -> None:
         self._page_loaders.pop(page_key, None)
+        self._sync_page_loads.discard(page_key)
+        self._stop_page_load_timer(page_key)
         self._page_ready_callbacks.pop(page_key, None)
+        elapsed_ms = int((time.perf_counter() - self._page_load_started.pop(page_key, time.perf_counter())) * 1000)
+        append_runtime_log(
+            "lazy_page_failed",
+            level="error",
+            page=page_key,
+            duration_ms=elapsed_ms,
+            error=str(message)[:500],
+        )
         placeholder = self._page_placeholders.get(page_key)
         if placeholder is not None:
             try:
@@ -548,6 +701,44 @@ class MainWindow(QMainWindow):
                 pass
         if self._idle_tasks_running:
             QTimer.singleShot(0, self._run_next_idle_task)
+
+    def _stop_page_load_timer(self, page_key: str) -> None:
+        timer = self._page_load_timers.pop(page_key, None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+
+    def _page_import_timeout(self, page_key: str, loader: PageImportThread) -> None:
+        if self._page_loaders.get(page_key) is not loader or page_key in self._loaded_pages:
+            return
+        append_runtime_log("lazy_page_slow", level="warning", page=page_key, duration_ms=15000)
+        placeholder = self._page_placeholders.get(page_key)
+        if placeholder is not None:
+            placeholder.show_error("加载时间较长，可稍后重试")
+
+    def _page_import_finished(self, page_key: str, loader: PageImportThread) -> None:
+        def finalize() -> None:
+            if self._page_loaders.get(page_key) is not loader or page_key in self._loaded_pages:
+                return
+            # Recover the exact state that used to leave "正在准备" on screen
+            # forever: the worker ended without delivering ready/failed.
+            self._page_loaders.pop(page_key, None)
+            self._stop_page_load_timer(page_key)
+            append_runtime_log("lazy_page_finished_without_result", level="warning", page=page_key)
+            self._load_page_sync_logged(page_key)
+
+        QTimer.singleShot(0, finalize)
+
+    def _retry_page_load(self, page_key: str) -> None:
+        loader = self._page_loaders.get(page_key)
+        if loader is not None and loader.isRunning():
+            placeholder = self._page_placeholders.get(page_key)
+            if placeholder is not None:
+                placeholder.show_waiting("页面仍在加载，请稍候…")
+            return
+        self._page_loaders.pop(page_key, None)
+        self._page_ready_callbacks.pop(page_key, None)
+        self._ensure_page_async(page_key)
 
     def _install_loaded_page(self, page_key: str, page_type: object) -> QWidget:
         existing = self._loaded_pages.get(page_key)
@@ -608,23 +799,71 @@ class MainWindow(QMainWindow):
         if self._application_is_in_use() or QApplication.activeModalWidget() is not None:
             self._schedule_idle_maintenance(30 * 1000)
             return
-        if self._backup_thread is not None and self._backup_thread.isRunning():
+        if (
+            (self._backup_thread is not None and self._backup_thread.isRunning())
+            or (
+                self._storage_maintenance_thread is not None
+                and self._storage_maintenance_thread.isRunning()
+            )
+        ):
             self._schedule_idle_maintenance(60 * 1000)
             return
         if self.settings.get("auto_backup", False):
             thread = IdleBackupThread(self.settings)
             thread.setParent(self)
-            thread.completed.connect(self._run_idle_soft_tasks)
-            thread.failed.connect(lambda _message: self._run_idle_soft_tasks())
+            thread.completed.connect(self._run_idle_storage_maintenance)
+            thread.failed.connect(self._idle_backup_failed)
             thread.finished.connect(thread.deleteLater)
             thread.finished.connect(self._clear_backup_thread)
             self._backup_thread = thread
             thread.start(QThread.Priority.LowPriority)
             return
-        self._run_idle_soft_tasks()
+        self._run_idle_storage_maintenance()
 
     def _clear_backup_thread(self) -> None:
         self._backup_thread = None
+
+    def _idle_backup_failed(self, message: str) -> None:
+        append_runtime_log("idle_backup_failed", level="warning", error=str(message)[:500])
+        self._run_idle_storage_maintenance()
+
+    def _run_idle_storage_maintenance(self) -> None:
+        if self._application_is_in_use() or QApplication.activeModalWidget() is not None:
+            self._schedule_idle_maintenance(30 * 1000)
+            return
+        if self._storage_maintenance_thread is not None and self._storage_maintenance_thread.isRunning():
+            return
+        thread = IdleStorageMaintenanceThread()
+        thread.setParent(self)
+        thread.completed.connect(self._idle_storage_maintenance_completed)
+        thread.failed.connect(self._idle_storage_maintenance_failed)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_storage_maintenance_thread)
+        self._storage_maintenance_thread = thread
+        append_runtime_log("idle_database_maintenance_started")
+        thread.start(QThread.Priority.LowPriority)
+
+    def _clear_storage_maintenance_thread(self) -> None:
+        self._storage_maintenance_thread = None
+
+    def _idle_storage_maintenance_completed(self, result: object) -> None:
+        values = result if isinstance(result, dict) else {}
+        append_runtime_log(
+            "idle_database_maintenance_completed",
+            expired_source_responses=values.get("expired_source_responses", 0),
+            stale_special_discoveries=values.get("stale_special_discoveries", 0),
+            legacy_app_tables_dropped=values.get("legacy_app_tables_dropped", 0),
+            cache_vacuumed=bool((values.get("cache_storage") or {}).get("vacuumed", False))
+            if isinstance(values.get("cache_storage"), dict)
+            else False,
+        )
+        self._run_idle_soft_tasks()
+
+    def _idle_storage_maintenance_failed(self, message: str) -> None:
+        append_runtime_log(
+            "idle_database_maintenance_failed", level="warning", error=str(message)[:500]
+        )
+        self._run_idle_soft_tasks()
 
     def _run_idle_soft_tasks(self) -> None:
         if self._idle_tasks_running:
@@ -658,6 +897,7 @@ class MainWindow(QMainWindow):
                 self._schedule_idle_maintenance(30 * 1000)
                 return
             page = self._loaded_pages.get(page_key)
+            before_workers = set(self._page_background_workers(page))
             try:
                 if page_key == "frontier" and action == "profile":
                     page.auto_update_profile_if_due(
@@ -673,9 +913,63 @@ class MainWindow(QMainWindow):
                     page.auto_refresh_if_due()
             except (AttributeError, RuntimeError):
                 pass
-            QTimer.singleShot(1500, self._run_next_idle_task)
+            started = [
+                worker
+                for worker in self._page_background_workers(page)
+                if worker not in before_workers and worker.isRunning()
+            ]
+            if started:
+                remaining = {worker for worker in started}
+                self._idle_background_workers.update(remaining)
+
+                def finished(worker: QThread) -> None:
+                    remaining.discard(worker)
+                    self._idle_background_workers.discard(worker)
+                    if not remaining:
+                        QTimer.singleShot(0, self._run_next_idle_task)
+
+                for worker in started:
+                    worker.finished.connect(lambda value=worker: finished(value))
+            else:
+                QTimer.singleShot(1500, self._run_next_idle_task)
 
         self._ensure_page_async(page_key, run_action)
+
+    @staticmethod
+    def _page_background_workers(page: object) -> list[QThread]:
+        if page is None:
+            return []
+        result: list[QThread] = []
+        for name in (
+            "_worker",
+            "_refresh_worker",
+            "_profile_ai_worker",
+            "_ai_worker",
+            "_metadata_worker",
+            "_jcr_worker",
+            "_easy_worker",
+        ):
+            worker = getattr(page, name, None)
+            if isinstance(worker, QThread):
+                result.append(worker)
+        return result
+
+    def _cancel_idle_background_work(self) -> None:
+        """Yield background CPU, network and storage work to active use."""
+
+        active = self._idle_tasks_running
+        self._idle_task_queue.clear()
+        self._idle_tasks_running = False
+        for thread in (self._backup_thread, self._storage_maintenance_thread):
+            if thread is not None and thread.isRunning():
+                active = True
+                thread.requestInterruption()
+        for worker in tuple(self._idle_background_workers):
+            if worker.isRunning():
+                active = True
+                worker.requestInterruption()
+        if active:
+            append_runtime_log("idle_background_cancelled_for_user_activity")
 
     def _apply_initial_navigation_state(self) -> None:
         self._set_sidebar_position(self.settings.get("sidebar_position", "left"), persist=False)
@@ -741,6 +1035,7 @@ class MainWindow(QMainWindow):
         page_key = {
             ("work", "tasks"): "todo",
             ("work", "notes"): "notes",
+            ("work", "tools"): "tools",
             ("papers", "submissions"): "papers",
             ("papers", "results"): "achievements",
             ("library", "journals"): "journals",
@@ -754,15 +1049,22 @@ class MainWindow(QMainWindow):
                 lambda selected=requested: self.navigate(selected.workbench, selected.anchor),
             )
             for button in self._nav_buttons:
-                button.setChecked(button.page_index == target.workbench)
+                button.setChecked(button.page_index == ("tools" if target.anchor == "tools" else target.workbench))
             self._home_idle_timer.start()
             return
         if page_key in self._dirty_pages:
             page = self._loaded_pages[page_key]
-            page.reload()
             self._dirty_pages.discard(page_key)
+            # The current cached model is already visible.  Ask the page to
+            # refresh in the background instead of blocking this navigation
+            # event with disk I/O, scoring and a complete widget rebuild.
+            request_reload = getattr(page, "request_reload", None)
+            if callable(request_reload):
+                request_reload()
+            else:
+                QTimer.singleShot(0, page.reload)
         for button in self._nav_buttons:
-            button.setChecked(button.page_index == target.workbench)
+            button.setChecked(button.page_index == ("tools" if target.anchor == "tools" else target.workbench))
         if target.workbench == "home":
             self._home_idle_timer.stop()
         else:
@@ -824,7 +1126,12 @@ class MainWindow(QMainWindow):
 
     def _reload_special_issue_surfaces(self, selected_issue_id: str = "", message: str = "") -> None:
         store = load_special_issue_overview()
-        self.special_issue_page.reload()
+        page = self.special_issue_page
+        apply_store = getattr(page, "_apply_loaded_store", None)
+        if callable(apply_store):
+            apply_store(store)
+        else:
+            page.reload()
         dialog = self._special_issue_dialog
         if dialog is not None:
             dialog.reload_data(store, store.get("items", []), load_papers())
@@ -832,17 +1139,45 @@ class MainWindow(QMainWindow):
                 dialog.select_issue(selected_issue_id)
             dialog.finish_progress(message or "操作完成")
 
-    def _run_special_issue_action(self, selected_issue_id: str, message: str, action) -> None:
+    def _run_special_issue_action(
+        self,
+        selected_issue_id: str,
+        message: str,
+        action,
+        on_success: Callable[[], None] | None = None,
+    ) -> None:
         dialog = self._special_issue_dialog
         if dialog is not None:
             dialog.set_progress(15, message)
-        try:
-            action()
-        except Exception as error:
+
+        if self._special_action_thread is not None and self._special_action_thread.isRunning():
             if dialog is not None:
-                dialog.finish_progress(f"未完成：{error}")
+                dialog.finish_progress("另一个特刊操作仍在进行，请稍候。")
             return
-        self._reload_special_issue_surfaces(selected_issue_id, "已完成，工作台保持打开")
+
+        worker = SpecialIssueActionThread(action, self)
+
+        def completed() -> None:
+            if on_success is not None:
+                on_success()
+            self._reload_special_issue_surfaces(selected_issue_id, "已完成，工作台保持打开")
+
+        def failed(message_text: str) -> None:
+            current_dialog = self._special_issue_dialog
+            if current_dialog is not None:
+                current_dialog.finish_progress(f"未完成：{message_text}")
+
+        worker.completed.connect(completed)
+        worker.failed.connect(failed)
+        worker.finished.connect(self._clear_special_action_thread)
+        self._special_action_thread = worker
+        worker.start(QThread.Priority.LowPriority)
+
+    def _clear_special_action_thread(self) -> None:
+        worker = self._special_action_thread
+        self._special_action_thread = None
+        if worker is not None:
+            worker.deleteLater()
 
     def _associate_special_issue(self, issue_id: str, paper_ids: list[str]) -> None:
         def action() -> None:
@@ -852,27 +1187,39 @@ class MainWindow(QMainWindow):
         self._run_special_issue_action(issue_id, "正在关联论文…", action)
 
     def _add_special_issue_path(self, issue_id: str, paper_id: str) -> None:
-        def action() -> None:
-            add_special_issue_to_submission_path(issue_id, paper_id)
+        def on_success() -> None:
             self._dirty_pages.update({"papers", "journals"})
             self.home_page.refresh()
 
-        self._run_special_issue_action(issue_id, "正在入库并创建投稿候选…", action)
+        self._run_special_issue_action(
+            issue_id,
+            "正在入库并创建投稿候选…",
+            lambda: add_special_issue_to_submission_path(issue_id, paper_id),
+            on_success,
+        )
 
     def _add_special_issue_journal(self, issue_id: str) -> None:
-        def action() -> None:
-            add_special_issue_journal_to_library(issue_id)
+        def on_success() -> None:
             self._dirty_pages.add("journals")
 
-        self._run_special_issue_action(issue_id, "正在加入期刊库…", action)
+        self._run_special_issue_action(
+            issue_id,
+            "正在加入期刊库…",
+            lambda: add_special_issue_journal_to_library(issue_id),
+            on_success,
+        )
 
     def _create_special_issue_task(self, issue_id: str, paper_id: str) -> None:
-        def action() -> None:
-            create_special_issue_preparation_task(issue_id, paper_id)
+        def on_success() -> None:
             self._dirty_pages.add("todo")
             self.home_page.refresh()
 
-        self._run_special_issue_action(issue_id, "正在创建准备任务…", action)
+        self._run_special_issue_action(
+            issue_id,
+            "正在创建准备任务…",
+            lambda: create_special_issue_preparation_task(issue_id, paper_id),
+            on_success,
+        )
 
     def _set_special_issue_status(self, issue_id: str, status: str) -> None:
         def action() -> None:
@@ -1396,7 +1743,7 @@ class MainWindow(QMainWindow):
         )
 
     def _reload_local_data(self) -> None:
-        for page_key in ("todo", "papers", "notes", "journals", "frontier"):
+        for page_key in ("todo", "papers", "notes", "journals", "frontier", "achievements", "special_issues", "tools"):
             page = self._loaded_pages.get(page_key)
             if page is not None:
                 page.reload()
@@ -1850,6 +2197,7 @@ class MainWindow(QMainWindow):
             QEvent.Type.Wheel,
         }
         if belongs_to_window and event.type() in interaction_events:
+            self._cancel_idle_background_work()
             self._schedule_idle_maintenance()
             if self.workbench_shell.current_route.workbench != "home":
                 self._home_idle_timer.start()
@@ -1913,6 +2261,67 @@ class MainWindow(QMainWindow):
             event.ignore()
             self._hide_to_tray(notify=True)
             return
+        active_threads = [
+            self._special_action_thread,
+            self._backup_thread,
+            self._storage_maintenance_thread,
+            *self._idle_background_workers,
+            *self._page_loaders.values(),
+        ]
+        if isinstance(loaded_pages, dict):
+            for page in loaded_pages.values():
+                active_threads.extend(
+                    getattr(page, name, None)
+                    for name in (
+                        "_load_worker",
+                        "_worker",
+                        "_refresh_worker",
+                        "_profile_ai_worker",
+                        "_ai_worker",
+                        "_comment_ai_worker",
+                        "_metadata_worker",
+                        "_jcr_worker",
+                        "_easy_worker",
+                    )
+                )
+        def running(thread):
+            try:
+                return thread is not None and thread.isRunning()
+            except RuntimeError:
+                return False  # A finished worker may already have been released by Qt.
+
+        for thread in active_threads:
+            if running(thread):
+                thread.requestInterruption()
+        from utils.database_write_queue import WRITE_QUEUE
+
+        if not getattr(self, "_shutdown_ready", False):
+            waiting = any(running(thread) for thread in active_threads)
+            if waiting or WRITE_QUEUE.pending_count() or WRITE_QUEUE.failures():
+                event.ignore()
+                if not getattr(self, "_shutdown_waiting", False):
+                    self._shutdown_waiting = True
+                    self.statusBar().showMessage("正在停止任务并完成保存，完成后自动退出…")
+                    self._shutdown_timer = QTimer(self)
+                    self._shutdown_timer.setInterval(100)
+
+                    def finish_shutdown() -> None:
+                        if any(running(thread) for thread in active_threads):
+                            return
+                        if WRITE_QUEUE.pending_count():
+                            return
+                        if WRITE_QUEUE.failures():
+                            self._shutdown_timer.stop()
+                            self._shutdown_waiting = False
+                            self._check_save_failures()
+                            return
+                        self._shutdown_timer.stop()
+                        self._shutdown_ready = True
+                        self.close()
+
+                    self._shutdown_timer.timeout.connect(finish_shutdown)
+                    self._shutdown_timer.start()
+                return
         self._capture_mode_geometry()
         self._save_settings()
         if self.tray_icon:

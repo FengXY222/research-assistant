@@ -1,4 +1,4 @@
-"""Small JSON-only persistence layer.
+"""Persistence facade for compact configuration and SQLite business data.
 
 Development runs keep data in the project's data/ directory. Packaged v12
 builds bind personal data to a stable LocalAppData UserData directory before
@@ -7,11 +7,15 @@ this module is imported, so application upgrades cannot replace user records.
 
 from __future__ import annotations
 
+from utils.backup_io import _sqlite_online_backup, _sha256_file, _copy_file_streaming
+
 import json
 import hashlib
 import os
 import shutil
+import sqlite3
 import sys
+import threading
 import uuid
 from copy import deepcopy
 from datetime import date, datetime, timedelta
@@ -38,6 +42,8 @@ _DATA_CANDIDATE_FILES = (
     "readings.json",
     "inspiration.json",
     "rejection_archive.json",
+    "research_assistant.sqlite",
+    "research_intelligence.sqlite",
 )
 
 
@@ -84,6 +90,19 @@ def _data_directory_score(directory: Path) -> tuple[int, int]:
             if not path.is_file():
                 continue
             byte_count += path.stat().st_size
+            if path.suffix.casefold() == ".sqlite":
+                connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=2.0)
+                try:
+                    exists = connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_datasets'"
+                    ).fetchone()
+                    if exists:
+                        record_count += int(
+                            connection.execute("SELECT COALESCE(SUM(item_count),0) FROM app_datasets").fetchone()[0]
+                        )
+                finally:
+                    connection.close()
+                continue
             payload = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(payload, list):
                 record_count += len(payload)
@@ -164,7 +183,12 @@ SPECIAL_ISSUES_FILE = DATA_DIR / "special_issues.json"
 SPECIAL_ISSUES_SUMMARY_FILE = DATA_DIR / "special_issues_summary.json"
 PDF_RESEARCH_CACHE_FILE = DATA_DIR / "achievement_pdf_cache.json"
 RESEARCH_PROFILE_FILE = DATA_DIR / "research_profile.json"
+# Durable user/business records and rebuildable network evidence deliberately
+# live in separate databases.  The latter can be pruned or recreated without
+# risking reading state, scores, journals or special-issue decisions.
+BUSINESS_DATA_FILE = DATA_DIR / "research_assistant.sqlite"
 RESEARCH_INTELLIGENCE_CACHE_FILE = DATA_DIR / "research_intelligence.sqlite"
+RUNTIME_LOG_FILE = DATA_DIR / "runtime.log"
 V13_RUNTIME_FILE = DATA_DIR / "runtime_v13.json"
 BACKUP_DIR = DATA_DIR / "backups"
 BACKUP_FILE_NAMES = (
@@ -182,7 +206,9 @@ BACKUP_FILE_NAMES = (
     SPECIAL_ISSUES_FILE.name,
     PDF_RESEARCH_CACHE_FILE.name,
     RESEARCH_PROFILE_FILE.name,
+    BUSINESS_DATA_FILE.name,
 )
+LEGACY_IMPORT_FILE_NAMES = (*BACKUP_FILE_NAMES, RESEARCH_INTELLIGENCE_CACHE_FILE.name)
 
 
 def _set_data_dir(directory: Path) -> None:
@@ -190,7 +216,7 @@ def _set_data_dir(directory: Path) -> None:
     global DATA_DIR, TODO_FILE, TODO_META_FILE, PAPERS_FILE, ACHIEVEMENTS_FILE, REJECTION_ARCHIVE_FILE
     global SELECTION_FEEDBACK_FILE, INSPIRATION_FILE
     global REMINDER_FILE, SETTINGS_FILE, READINGS_FILE, JOURNALS_FILE, FRONTIER_FILE, SPECIAL_ISSUES_FILE, SPECIAL_ISSUES_SUMMARY_FILE, PDF_RESEARCH_CACHE_FILE
-    global RESEARCH_PROFILE_FILE, RESEARCH_INTELLIGENCE_CACHE_FILE, V13_RUNTIME_FILE, BACKUP_DIR
+    global RESEARCH_PROFILE_FILE, BUSINESS_DATA_FILE, RESEARCH_INTELLIGENCE_CACHE_FILE, RUNTIME_LOG_FILE, V13_RUNTIME_FILE, BACKUP_DIR
     DATA_DIR = directory
     TODO_FILE = DATA_DIR / "todo.json"
     TODO_META_FILE = DATA_DIR / "todo_meta.json"
@@ -208,7 +234,9 @@ def _set_data_dir(directory: Path) -> None:
     SPECIAL_ISSUES_SUMMARY_FILE = DATA_DIR / "special_issues_summary.json"
     PDF_RESEARCH_CACHE_FILE = DATA_DIR / "achievement_pdf_cache.json"
     RESEARCH_PROFILE_FILE = DATA_DIR / "research_profile.json"
+    BUSINESS_DATA_FILE = DATA_DIR / "research_assistant.sqlite"
     RESEARCH_INTELLIGENCE_CACHE_FILE = DATA_DIR / "research_intelligence.sqlite"
+    RUNTIME_LOG_FILE = DATA_DIR / "runtime.log"
     V13_RUNTIME_FILE = DATA_DIR / "runtime_v13.json"
     BACKUP_DIR = DATA_DIR / "backups"
 
@@ -394,6 +422,62 @@ def _write_json(path: Path, value: Any) -> None:
         json.dump(value, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
     temporary.replace(path)
+
+
+_RUNTIME_LOG_LOCK = threading.RLock()
+_BUSINESS_STORE_LOCK = threading.RLock()
+_BUSINESS_STORE_BOOTSTRAPPED: set[Path] = set()
+
+
+def append_runtime_log(event: str, *, level: str = "info", **fields: Any) -> None:
+    """Append one bounded JSON-line diagnostic event.
+
+    The log contains operational state only—page keys, durations and error
+    messages—never API secrets or document contents.
+    """
+
+    payload = {
+        "at": datetime.now().isoformat(timespec="milliseconds"),
+        "level": str(level or "info")[:20],
+        "event": str(event or "runtime")[:80],
+        **{str(key): value for key, value in fields.items()},
+    }
+    line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str) + "\n"
+    try:
+        with _RUNTIME_LOG_LOCK:
+            RUNTIME_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            if RUNTIME_LOG_FILE.is_file() and RUNTIME_LOG_FILE.stat().st_size > 2 * 1024 * 1024:
+                rotated = RUNTIME_LOG_FILE.with_name("runtime.log.1")
+                RUNTIME_LOG_FILE.replace(rotated)
+            with RUNTIME_LOG_FILE.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+    except OSError:
+        # Diagnostics must never prevent the application from opening.
+        return
+
+
+def business_data_store():
+    """Return the dedicated durable store after an idempotent legacy split."""
+
+    from utils.app_data_store import AppDataStore, migrate_legacy_app_data
+
+    destination = BUSINESS_DATA_FILE.resolve()
+    with _BUSINESS_STORE_LOCK:
+        store = AppDataStore(destination)
+        if destination not in _BUSINESS_STORE_BOOTSTRAPPED:
+            migration = migrate_legacy_app_data(RESEARCH_INTELLIGENCE_CACHE_FILE, destination)
+            _BUSINESS_STORE_BOOTSTRAPPED.add(destination)
+            if migration.get("migrated"):
+                append_runtime_log(
+                    "business_database_migrated",
+                    source=str(RESEARCH_INTELLIGENCE_CACHE_FILE),
+                    destination=str(destination),
+                    tables=migration.get("tables", {}),
+                )
+                store = AppDataStore(destination)
+        return store
+
+
 
 
 def _normalize_todo(item: dict[str, Any], default_day: str | None = None) -> dict[str, Any]:
@@ -1231,13 +1315,17 @@ def _normalize_frontier_item(raw: Any) -> dict[str, Any] | None:
 
 
 def load_frontier_data() -> dict[str, Any]:
-    payload = _read_json(FRONTIER_FILE, {})
+    store = business_data_store()
+    payload = store.load_frontier()
+    if payload is None:
+        payload = _read_json(FRONTIER_FILE, {})
     payload = payload if isinstance(payload, dict) else {}
     raw_items = payload.get("items", [])
     items = [_normalize_frontier_item(item) for item in raw_items] if isinstance(raw_items, list) else []
     source_cache = payload.get("source_cache", {})
     source_cache = source_cache if isinstance(source_cache, dict) else {}
-    return {
+    result = {
+        "_storage_revision": payload.get("_storage_revision"),
         "profile": _normalize_frontier_profile(payload.get("profile")),
         "items": [item for item in items if item is not None],
         "last_checked": str(payload.get("last_checked", "")).strip(),
@@ -1253,11 +1341,30 @@ def load_frontier_data() -> dict[str, Any]:
         "recall_outcomes": deepcopy(payload.get("recall_outcomes", {})) if isinstance(payload.get("recall_outcomes"), dict) else {},
         "last_batch_id": str(payload.get("last_batch_id", "")).strip(),
         "last_success_at": str(payload.get("last_success_at", "")).strip(),
+        "ai_review": deepcopy(payload.get("ai_review", {})),
+        "candidate_pool": deepcopy(payload.get("candidate_pool", {})),
+        "run_summary": deepcopy(payload.get("run_summary", {})),
     }
+    if not store.has_dataset("frontier"):
+        store.save_frontier(result)
+    return result
 
 
 def save_frontier_data(data: dict[str, Any]) -> None:
-    _write_json(FRONTIER_FILE, frontier_storage_payload(data))
+    payload = frontier_storage_payload(data)
+    business_data_store().save_frontier(payload)
+    data["_storage_revision"] = payload["_storage_revision"]
+
+
+def save_frontier_changes(before: dict[str, Any], after: dict[str, Any]) -> None:
+    business_data_store().patch_frontier(frontier_storage_payload(before), frontier_storage_payload(after))
+
+
+def load_frontier_preview_data(limit: int = 120) -> dict[str, Any]:
+    """Return the pre-scored subset needed by the home dashboard."""
+
+    payload = business_data_store().load_frontier_preview(limit=limit)
+    return payload if isinstance(payload, dict) else load_frontier_data()
 
 
 def frontier_storage_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -1268,6 +1375,7 @@ def frontier_storage_payload(data: dict[str, Any]) -> dict[str, Any]:
     source_cache = data.get("source_cache", {})
     source_cache = source_cache if isinstance(source_cache, dict) else {}
     return {
+            "_storage_revision": data.get("_storage_revision"),
             "profile": _normalize_frontier_profile(data.get("profile")),
             "items": [item for item in normalized_items if item is not None],
             "last_checked": str(data.get("last_checked", "")).strip(),
@@ -1283,6 +1391,9 @@ def frontier_storage_payload(data: dict[str, Any]) -> dict[str, Any]:
             "recall_outcomes": deepcopy(data.get("recall_outcomes", {})) if isinstance(data.get("recall_outcomes"), dict) else {},
             "last_batch_id": str(data.get("last_batch_id", "")).strip(),
             "last_success_at": str(data.get("last_success_at", "")).strip(),
+            "ai_review": deepcopy(data.get("ai_review", {})),
+            "candidate_pool": deepcopy(data.get("candidate_pool", {})),
+            "run_summary": deepcopy(data.get("run_summary", {})),
         }
 
 
@@ -1298,18 +1409,16 @@ def commit_frontier_v13_data(
     A partial commit keeps useful results visible while leaving the task due;
     its next run can therefore retry only the failed sources.
     """
-    from utils.action_transaction import apply_json_transaction
     from utils.v13_pipeline import checkpoint, trim_batches
 
     finalized = checkpoint(runtime, batch_id, "commit", state="success" if complete else "partial")
     finalized = trim_batches(finalized)
-    apply_json_transaction(
-        {
-            FRONTIER_FILE: frontier_storage_payload(data),
-            V13_RUNTIME_FILE: finalized,
-        },
-        action_key=batch_id,
-    )
+    # Both durable records now live in the WAL-backed application database.
+    # The batch id remains the idempotency marker if a process stops between
+    # the two compact commits.
+    payload = frontier_storage_payload(data)
+    business_data_store().commit_frontier(payload, finalized)
+    data["_storage_revision"] = payload["_storage_revision"]
     return finalized
 
 
@@ -1317,25 +1426,34 @@ def load_v13_runtime() -> dict[str, Any]:
     """Load the small crash-resume journal without importing pipeline code globally."""
     from utils.v13_pipeline import trim_batches
 
-    raw = _read_json(V13_RUNTIME_FILE, {})
-    compacted = trim_batches(raw)
-    # Old releases could leave tens of megabytes of superseded stage payloads.
-    # Persist the compact representation on first use so every later task and
-    # process benefits instead of paying the parse/memory cost again.
+    store = business_data_store()
     try:
         oversized = V13_RUNTIME_FILE.stat().st_size > 8 * 1024 * 1024
     except OSError:
         oversized = False
+    raw = None if oversized else store.load_runtime()
+    used_legacy = raw is None and V13_RUNTIME_FILE.is_file()
+    if raw is None:
+        raw = _read_json(V13_RUNTIME_FILE, {})
+    compacted = trim_batches(raw)
+    # Old releases could leave tens of megabytes of superseded stage payloads.
+    # Persist the compact representation on first use so every later task and
+    # process benefits instead of paying the parse/memory cost again.
     raw_batches = raw.get("batches", {}) if isinstance(raw, dict) else {}
-    if oversized or (isinstance(raw_batches, dict) and len(raw_batches) > 40):
-        _write_json(V13_RUNTIME_FILE, compacted)
+    if oversized or used_legacy or (isinstance(raw_batches, dict) and len(raw_batches) > 40):
+        store.save_runtime(compacted)
+        # Leave a tiny, explicit migration marker instead of a second active
+        # business-data store that can grow or be parsed accidentally.
+        _write_json(V13_RUNTIME_FILE, {"migrated_to": BUSINESS_DATA_FILE.name})
+    elif not store.has_dataset("runtime"):
+        store.save_runtime(compacted)
     return compacted
 
 
 def save_v13_runtime(value: dict[str, Any]) -> None:
     from utils.v13_pipeline import trim_batches
 
-    _write_json(V13_RUNTIME_FILE, trim_batches(value))
+    business_data_store().save_runtime(trim_batches(value))
 
 
 def record_frontier_feedback_event(
@@ -1859,11 +1977,21 @@ def _normalize_selection_feedback(raw: Any) -> dict[str, Any]:
 
 
 def load_journal_selection_feedback() -> dict[str, Any]:
-    return _normalize_selection_feedback(_read_json(SELECTION_FEEDBACK_FILE, {}))
+    store = business_data_store()
+    payload = store.load_named_payload("selection_feedback", {})
+    if payload is None:
+        payload = _read_json(SELECTION_FEEDBACK_FILE, {})
+        normalized = _normalize_selection_feedback(payload)
+        store.save_named_payload("selection_feedback", normalized, item_count=len(normalized["entries"]))
+        return normalized
+    return _normalize_selection_feedback(payload)
 
 
 def save_journal_selection_feedback(value: dict[str, Any]) -> None:
-    _write_json(SELECTION_FEEDBACK_FILE, _normalize_selection_feedback(value))
+    normalized = _normalize_selection_feedback(value)
+    business_data_store().save_named_payload(
+        "selection_feedback", normalized, item_count=len(normalized["entries"])
+    )
 
 
 def selection_feedback_for(paper_id: str, journal_id: str) -> str:
@@ -2204,21 +2332,28 @@ def normalize_library_journal(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_journal_library() -> list[dict[str, Any]]:
-    payload = _read_json(JOURNALS_FILE, [])
+    store = business_data_store()
+    payload = store.load_journals()
+    if payload is None:
+        payload = _read_json(JOURNALS_FILE, [])
     if not isinstance(payload, list) or not payload:
         # A new installation starts with a compact, useful land-science library.
-        return [normalize_library_journal(item) for item in default_land_science_catalog()]
+        normalized = [normalize_library_journal(item) for item in default_land_science_catalog()]
+        store.save_journals(normalized)
+        return normalized
     normalized = [normalize_library_journal(item) for item in payload if isinstance(item, dict) and str(item.get("name", "")).strip()]
     # One-time, lossless local migration for publisher-family grouping and old
     # metadata corrections. Personal tags, notes and submission history remain intact.
     if normalized != payload:
-        _write_json(JOURNALS_FILE, normalized)
+        store.save_journals(normalized)
+    elif not store.has_dataset("journals"):
+        store.save_journals(normalized)
     return normalized
 
 
 def save_journal_library(items: list[dict[str, Any]]) -> None:
     normalized = [normalize_library_journal(item) for item in items if isinstance(item, dict) and str(item.get("name", "")).strip()]
-    _write_json(JOURNALS_FILE, normalized)
+    business_data_store().save_journals(normalized)
 
 
 def journal_usage_index(papers: list[dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
@@ -2298,8 +2433,19 @@ def sync_journal_library_from_papers(papers: list[dict[str, Any]] | None = None)
     return library
 
 
-def create_backup(name: str | None = None, automatic: bool = False) -> Path:
-    """Copy the JSON data files into a dated, portable snapshot directory."""
+
+
+
+
+def create_backup(
+    name: str | None = None,
+    automatic: bool = False,
+    cancelled: Any = None,
+) -> Path:
+    """Create a consistent portable snapshot, including the live WAL database."""
+    # Ensure an upgrade from the short-lived single-database layout is split
+    # before the disposable cache is deliberately excluded from the backup.
+    business_data_store()
     if name is None:
         name = f"{'auto' if automatic else 'manual'}-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}"
     safe_name = Path(name).name
@@ -2307,36 +2453,92 @@ def create_backup(name: str | None = None, automatic: bool = False) -> Path:
         raise ValueError("Invalid backup name")
     target = BACKUP_DIR / safe_name
     if target.exists():
-        return target
+        manifest = _read_json(target / "manifest.json", {})
+        hashes = manifest.get("sha256", {}) if isinstance(manifest, dict) else {}
+        files = manifest.get("files", []) if isinstance(manifest, dict) else []
+        if files and all(
+            not Path(filename).is_absolute() and ".." not in Path(filename).parts and (target / filename).is_file()
+            and hashes.get(filename) == _sha256_file(target / filename, cancelled=cancelled)
+            for filename in files
+        ):
+            return target
+        quarantine = target.with_name(target.name + ".incomplete-" + datetime.now().strftime("%Y%m%d%H%M%S%f"))
+        target.rename(quarantine)
+    final_target = target
+    target = BACKUP_DIR / (safe_name + ".building-" + datetime.now().strftime("%Y%m%d%H%M%S%f"))
     target.mkdir(parents=True, exist_ok=False)
-    files: list[str] = []
-    hashes: dict[str, str] = {}
-    for filename in BACKUP_FILE_NAMES:
-        source = DATA_DIR / filename
-        if source.exists():
-            shutil.copy2(source, target / filename)
-            files.append(filename)
-            hashes[filename] = hashlib.sha256((target / filename).read_bytes()).hexdigest()
-    # Settings are useful during recovery, but DPAPI tokens must never enter
-    # a portable backup.  Keep the configuration shape and clear every secret.
-    sanitized_settings = _sanitize_backup_payload(load_app_settings())
-    settings_backup = target / SETTINGS_FILE.name
-    settings_backup.write_text(json.dumps(sanitized_settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    files.append(SETTINGS_FILE.name)
-    hashes[SETTINGS_FILE.name] = hashlib.sha256(settings_backup.read_bytes()).hexdigest()
-    _write_json(
-        target / "manifest.json",
-        {
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "automatic": automatic,
-            "files": files,
-            "sha256": hashes,
-            "schema": 13,
-            "secrets_included": False,
-        },
-    )
+    try:
+        files: list[str] = []
+        hashes: dict[str, str] = {}
+        for filename in BACKUP_FILE_NAMES:
+            if cancelled and cancelled():
+                raise InterruptedError("备份已因用户恢复操作而暂停")
+            source = DATA_DIR / filename
+            if source.exists():
+                destination = target / filename
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if source.resolve() == BUSINESS_DATA_FILE.resolve():
+                    _sqlite_online_backup(source, destination, cancelled=cancelled)
+                else:
+                    _copy_file_streaming(source, destination, cancelled=cancelled)
+                files.append(filename)
+                hashes[filename] = _sha256_file(destination, cancelled=cancelled)
+        component_source = DATA_DIR / "pdf-translator" / "jobs.sqlite"
+        if component_source.is_file():
+            component_name = "pdf-translator/jobs.sqlite"
+            component_destination = target / component_name
+            component_destination.parent.mkdir(parents=True, exist_ok=True)
+            _sqlite_online_backup(component_source, component_destination, cancelled=cancelled)
+            import sqlite3
+            connection = sqlite3.connect(component_destination)
+            try:
+                connection.execute("PRAGMA secure_delete=ON")
+                with connection:
+                    for row in connection.execute("SELECT id,payload FROM settings").fetchall():
+                        sanitized = _sanitize_backup_payload(json.loads(row[1]))
+                        sanitized["backup_original_root"] = str(component_source.parent)
+                        connection.execute("UPDATE settings SET payload=? WHERE id=?", (json.dumps(sanitized, ensure_ascii=False), row[0]))
+                connection.execute("VACUUM")
+            finally:
+                connection.close()
+            files.append(component_name)
+            hashes[component_name] = _sha256_file(component_destination, cancelled=cancelled)
+            from utils.pdf_translation_store import TranslationStore
+            component_settings = TranslationStore(component_destination.parent).settings()
+            if component_settings.get("backup_outputs", False):
+                for result_pdf in (component_source.parent / "results").rglob("*.pdf"):
+                    if cancelled and cancelled():
+                        raise InterruptedError("备份已暂停")
+                    relative = result_pdf.relative_to(DATA_DIR).as_posix()
+                    destination_pdf = target / relative
+                    destination_pdf.parent.mkdir(parents=True, exist_ok=True)
+                    _copy_file_streaming(result_pdf, destination_pdf, cancelled=cancelled)
+                    files.append(relative)
+                    hashes[relative] = _sha256_file(destination_pdf, cancelled=cancelled)
+        # Settings are useful during recovery, but DPAPI tokens must never enter
+        # a portable backup.  Keep the configuration shape and clear every secret.
+        sanitized_settings = _sanitize_backup_payload(load_app_settings())
+        settings_backup = target / SETTINGS_FILE.name
+        settings_backup.write_text(json.dumps(sanitized_settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        files.append(SETTINGS_FILE.name)
+        hashes[SETTINGS_FILE.name] = _sha256_file(settings_backup, cancelled=cancelled)
+        _write_json(
+            target / "manifest.json",
+            {
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "automatic": automatic,
+                "files": files,
+                "sha256": hashes,
+                "schema": 13,
+                "secrets_included": False,
+            },
+        )
+        target.rename(final_target)
+    except Exception:
+        shutil.rmtree(target, ignore_errors=True)
+        raise
     _trim_auto_backups()
-    return target
+    return final_target
 
 
 def _sanitize_backup_payload(value: Any, key: str = "") -> Any:
@@ -2358,19 +2560,25 @@ def _sanitize_backup_payload(value: Any, key: str = "") -> Any:
 def _trim_auto_backups(daily_limit: int = 7, weekly_limit: int = 4) -> None:
     if not BACKUP_DIR.exists():
         return
-    daily = sorted((path for path in BACKUP_DIR.iterdir() if path.is_dir() and path.name.startswith("auto-")), reverse=True)
-    weekly = sorted((path for path in BACKUP_DIR.iterdir() if path.is_dir() and path.name.startswith("weekly-")), reverse=True)
+    complete = [path for path in BACKUP_DIR.iterdir() if path.is_dir()
+                and (path / "manifest.json").is_file() and ".building-" not in path.name and ".incomplete-" not in path.name]
+    daily = sorted((path for path in complete if path.name.startswith("auto-")), reverse=True)
+    weekly = sorted((path for path in complete if path.name.startswith("weekly-")), reverse=True)
     for path in [*daily[max(1, daily_limit):], *weekly[max(1, weekly_limit):]]:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def maybe_create_daily_backup(settings: dict[str, Any]) -> Path | None:
+def maybe_create_daily_backup(settings: dict[str, Any], cancelled: Any = None) -> Path | None:
     if not bool(settings.get("auto_backup", False)):
         return None
     today = date.today()
-    daily = create_backup(f"auto-{today.isoformat()}", automatic=True)
+    daily = create_backup(f"auto-{today.isoformat()}", automatic=True, cancelled=cancelled)
     iso_year, iso_week, _weekday = today.isocalendar()
-    create_backup(f"weekly-{iso_year}-W{iso_week:02d}", automatic=True)
+    create_backup(
+        f"weekly-{iso_year}-W{iso_week:02d}",
+        automatic=True,
+        cancelled=cancelled,
+    )
     return daily
 
 
@@ -2381,10 +2589,14 @@ def list_backups() -> list[dict[str, Any]]:
     for path in BACKUP_DIR.iterdir():
         if not path.is_dir():
             continue
+        if ".building-" in path.name or ".incomplete-" in path.name:
+            continue
         manifest = _read_json(path / "manifest.json", {})
         if not isinstance(manifest, dict):
             continue
         files = manifest.get("files", [])
+        if not files:
+            continue
         backups.append(
             {
                 "name": path.name,
@@ -2397,6 +2609,8 @@ def list_backups() -> list[dict[str, Any]]:
 
 
 def restore_backup(name: str) -> None:
+    from utils.pdf_translation_controller import ensure_translation_idle
+    ensure_translation_idle()
     safe_name = Path(name).name
     if safe_name != name:
         raise ValueError("Invalid backup name")
@@ -2409,15 +2623,34 @@ def restore_backup(name: str) -> None:
         raise ValueError("Invalid backup manifest")
     hashes = manifest.get("sha256", {}) if isinstance(manifest.get("sha256"), dict) else {}
     for filename in files:
+        if Path(str(filename)).is_absolute() or ".." in Path(str(filename)).parts:
+            raise ValueError("备份文件路径无效")
         source = source_dir / str(filename)
         if not source.is_file():
             raise ValueError(f"备份缺少文件：{filename}")
         expected = str(hashes.get(str(filename), ""))
-        if expected and hashlib.sha256(source.read_bytes()).hexdigest() != expected:
+        if expected and _sha256_file(source) != expected:
             raise ValueError(f"备份完整性校验失败：{filename}")
     # A restore is destructive by nature, so preserve the current state first.
     create_backup(f"before-restore-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    component_name = "pdf-translator/jobs.sqlite"
+    if component_name in files:
+        component_target = DATA_DIR / component_name
+        component_target.parent.mkdir(parents=True, exist_ok=True)
+        _sqlite_online_backup(source_dir / component_name, component_target)
+        from utils.pdf_translation_store import TranslationStore
+        restored_component = TranslationStore(component_target.parent)
+        component_settings = restored_component.settings()
+        original_root = component_settings.pop("backup_original_root", "")
+        if original_root:
+            restored_component.rebase_paths(original_root)
+            restored_component.save_settings(component_settings)
+    for filename in files:
+        if str(filename).startswith("pdf-translator/results/") and Path(filename).suffix.casefold() == ".pdf":
+            destination_pdf = DATA_DIR / filename
+            destination_pdf.parent.mkdir(parents=True, exist_ok=True)
+            _copy_file_streaming(source_dir / filename, destination_pdf)
     backed_up_files = {str(filename) for filename in files if str(filename) in BACKUP_FILE_NAMES}
     for filename in BACKUP_FILE_NAMES:
         target = DATA_DIR / filename
@@ -2425,7 +2658,33 @@ def restore_backup(name: str) -> None:
             continue
         source = source_dir / filename
         if source.is_file():
-            shutil.copy2(source, target)
+            if filename == BUSINESS_DATA_FILE.name:
+                _sqlite_online_backup(source, target)
+            else:
+                shutil.copy2(source, target)
+    # Backups made by the transitional single-database release stored durable
+    # app_* tables inside research_intelligence.sqlite.  Restore those through
+    # a temporary dedicated database instead of treating the cache as the new
+    # source of truth.
+    legacy_cache_name = RESEARCH_INTELLIGENCE_CACHE_FILE.name
+    if BUSINESS_DATA_FILE.name not in backed_up_files and legacy_cache_name in {str(value) for value in files}:
+        from utils.app_data_store import migrate_legacy_app_data
+
+        legacy_source = source_dir / legacy_cache_name
+        if legacy_source.is_file():
+            _sqlite_online_backup(legacy_source, RESEARCH_INTELLIGENCE_CACHE_FILE)
+            temporary_business = DATA_DIR / f".{BUSINESS_DATA_FILE.name}.restore"
+            temporary_business.unlink(missing_ok=True)
+            try:
+                migration = migrate_legacy_app_data(RESEARCH_INTELLIGENCE_CACHE_FILE, temporary_business)
+                if not migration.get("migrated"):
+                    raise ValueError("旧版备份中没有可恢复的业务数据")
+                _sqlite_online_backup(temporary_business, BUSINESS_DATA_FILE)
+            finally:
+                temporary_business.unlink(missing_ok=True)
+                Path(str(temporary_business) + "-wal").unlink(missing_ok=True)
+                Path(str(temporary_business) + "-shm").unlink(missing_ok=True)
+            _BUSINESS_STORE_BOOTSTRAPPED.discard(BUSINESS_DATA_FILE.resolve())
     settings_source = source_dir / SETTINGS_FILE.name
     if settings_source.is_file():
         restored = _read_json(settings_source, {})
@@ -2472,6 +2731,8 @@ def change_data_location(destination: str | Path) -> Path:
         return source
     if source in target.parents or target in source.parents:
         raise ValueError("请选择当前数据目录之外的独立文件夹")
+    from utils.pdf_translation_controller import ensure_translation_idle
+    ensure_translation_idle()
     target.mkdir(parents=True, exist_ok=True)
     source_items = list(source.iterdir()) if source.is_dir() else []
     conflicts = [item.name for item in source_items if (target / item.name).exists()]
@@ -2481,7 +2742,24 @@ def change_data_location(destination: str | Path) -> Path:
         for item in source_items:
             destination_item = target / item.name
             if item.is_dir():
-                shutil.copytree(item, destination_item)
+                if item.name == "pdf-translator":
+                    shutil.copytree(item, destination_item, ignore=shutil.ignore_patterns("jobs.sqlite", "jobs.sqlite-wal", "jobs.sqlite-shm"))
+                    if (item / "jobs.sqlite").is_file():
+                        _sqlite_online_backup(item / "jobs.sqlite", destination_item / "jobs.sqlite")
+                else:
+                    shutil.copytree(item, destination_item)
+            elif item.resolve() in {
+                BUSINESS_DATA_FILE.resolve(),
+                RESEARCH_INTELLIGENCE_CACHE_FILE.resolve(),
+            }:
+                _sqlite_online_backup(item, destination_item)
+            elif item.name in {
+                BUSINESS_DATA_FILE.name + "-wal",
+                BUSINESS_DATA_FILE.name + "-shm",
+                RESEARCH_INTELLIGENCE_CACHE_FILE.name + "-wal",
+                RESEARCH_INTELLIGENCE_CACHE_FILE.name + "-shm",
+            }:
+                continue
             else:
                 shutil.copy2(item, destination_item)
         _save_storage_location(target)
@@ -2505,7 +2783,7 @@ def import_legacy_data_directory(source_directory: str | Path) -> int:
         raise ValueError("请选择旧版的 data 文件夹")
     if source == DATA_DIR.resolve():
         raise ValueError("这已经是当前数据文件夹")
-    files = [name for name in BACKUP_FILE_NAMES if (source / name).is_file()]
+    files = [name for name in LEGACY_IMPORT_FILE_NAMES if (source / name).is_file()]
     if not files:
         raise ValueError("所选文件夹中没有可导入的科研助手数据")
     try:
@@ -2516,9 +2794,50 @@ def import_legacy_data_directory(source_directory: str | Path) -> int:
         # a perfectly usable legacy directory because its first backup failed.
         pass
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    source_has_business = (source / BUSINESS_DATA_FILE.name).is_file()
+    source_has_cache = (source / RESEARCH_INTELLIGENCE_CACHE_FILE.name).is_file()
+    migrated_business: Path | None = None
+    if not source_has_business and source_has_cache:
+        from utils.app_data_store import migrate_legacy_app_data
+
+        candidate = DATA_DIR / f".{BUSINESS_DATA_FILE.name}.{uuid.uuid4().hex}.legacy-import"
+        migration = migrate_legacy_app_data(source / RESEARCH_INTELLIGENCE_CACHE_FILE.name, candidate)
+        if migration.get("migrated"):
+            migrated_business = candidate
+        else:
+            candidate.unlink(missing_ok=True)
     for name in files:
         target = DATA_DIR / name
         temporary = target.with_suffix(target.suffix + ".importing")
-        shutil.copy2(source / name, temporary)
-        temporary.replace(target)
+        source_file = source / name
+        temporary.unlink(missing_ok=True)
+        if source_file.suffix.casefold() == ".sqlite":
+            _sqlite_online_backup(source_file, target)
+        else:
+            shutil.copy2(source_file, temporary)
+            temporary.replace(target)
+    if migrated_business is not None:
+        try:
+            _sqlite_online_backup(migrated_business, BUSINESS_DATA_FILE)
+        finally:
+            migrated_business.unlink(missing_ok=True)
+            Path(str(migrated_business) + "-wal").unlink(missing_ok=True)
+            Path(str(migrated_business) + "-shm").unlink(missing_ok=True)
+    elif not source_has_business and not source_has_cache:
+        # Pure JSON imports predate SQLite.  Start a clean business database so
+        # the normal first-use loaders import those restored JSON records.
+        from utils.app_data_store import AppDataStore, drop_legacy_app_tables
+
+        empty_business = DATA_DIR / f".{BUSINESS_DATA_FILE.name}.{uuid.uuid4().hex}.empty-import"
+        try:
+            AppDataStore(empty_business)
+            _sqlite_online_backup(empty_business, BUSINESS_DATA_FILE)
+            drop_legacy_app_tables(RESEARCH_INTELLIGENCE_CACHE_FILE)
+        finally:
+            empty_business.unlink(missing_ok=True)
+            Path(str(empty_business) + "-wal").unlink(missing_ok=True)
+            Path(str(empty_business) + "-shm").unlink(missing_ok=True)
+    # An imported v13.1 cache may still contain durable app_* tables.  Reset
+    # this process-local guard so first access performs the verified split.
+    _BUSINESS_STORE_BOOTSTRAPPED.discard(BUSINESS_DATA_FILE.resolve())
     return len(files)

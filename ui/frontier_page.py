@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from copy import deepcopy
+import os
 from uuid import uuid4
 
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
@@ -48,11 +49,13 @@ from utils.file_manager import (
     load_readings,
     load_inspirations,
     record_frontier_feedback_event,
-    save_frontier_data,
+    save_frontier_changes,
     save_inspirations,
     save_journal_library,
     save_readings,
 )
+from utils.database_write_queue import submit_database_write
+from ui.virtual_cards import VirtualCardList
 from utils.frontier_scoring import apply_frontier_ranking, canonical_text, classify_feedback_locally
 from utils.easyscholar_service import is_easyscholar_ready
 from utils.journal_health_service import import_frontier_journal
@@ -84,6 +87,14 @@ _SEEDED_RECALL_LABELS = {
     "citation_network": "引文网络",
     "confirmed_author_team": "确认作者团队",
 }
+
+
+def _load_frontier_snapshot() -> dict:
+    """Read a pre-scored immutable page snapshot off the GUI thread."""
+
+    data = load_frontier_data()
+    data["profile"] = load_research_profile()
+    return data
 
 
 def recall_seed_guidance(outcomes: object) -> str:
@@ -279,6 +290,23 @@ class FrontierJournalPriorityDialog(QDialog):
         self.accept()
 
 
+class FrontierLoadThread(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        if self.isInterruptionRequested():
+            return
+        try:
+            result = _load_frontier_snapshot()
+        except Exception as error:  # noqa: BLE001 - keep cached content usable
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(error))
+            return
+        if not self.isInterruptionRequested():
+            self.completed.emit(result)
+
+
 class FrontierRefreshThread(QThread):
     completed = Signal(dict)
     failed = Signal(str)
@@ -304,6 +332,7 @@ class FrontierRefreshThread(QThread):
                     self._data,
                     self._journals,
                     manual=self._manual,
+                    cancelled=self.isInterruptionRequested,
                     progress=lambda message, value=0: self.progress.emit(str(message), int(value or 0)),
                 )
             )
@@ -734,7 +763,12 @@ class DailyFrontierPage(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.data = self._load_data()
+        self.data = {"profile": {}, "items": [], "fingerprints": []}
+        self._persisted_snapshot = deepcopy(self.data)
+        self._save_sequence = 0
+        self._load_generation = 0
+        self._loaded = False
+        self._load_worker: FrontierLoadThread | None = None
         self._worker: FrontierRefreshThread | None = None
         self._ai_worker: FrontierAiRerankThread | None = None
         self._profile_ai_worker: FrontierProfileAiThread | None = None
@@ -742,12 +776,28 @@ class DailyFrontierPage(QWidget):
         self._pending_auto_ai_rerank = False
         self._profile_ai_refresh_after = False
         self._profile_ai_source_signature = ""
-        self._render_batch_size = 24
-        self._render_limit = self._render_batch_size
         self._header_width_known = False
         self.ai_progress: AiProgressPanel | None = None
         self._build_ui()
         self._render()
+        if os.environ.get("RESEARCH_ASSISTANT_DISABLE_BACKGROUND") == "1":
+            self.reload()
+        else:
+            self.status_label.setText("正在后台载入每日前沿…")
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().showEvent(event)
+        if not self._loaded:
+            if self.data.get("items"):
+                self._loaded = True
+                return
+            if self.window() is self:
+                self.reload()
+                return
+            if os.environ.get("RESEARCH_ASSISTANT_DISABLE_BACKGROUND") == "1":
+                self.reload()
+            else:
+                self.request_reload()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -800,17 +850,9 @@ class DailyFrontierPage(QWidget):
         root.addWidget(self.cache_hint)
         self.ai_progress = AiProgressPanel(object_name="frontierRefreshProgress")
         root.addWidget(self.ai_progress)
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.content = QWidget()
+        self.scroll = VirtualCardList(self._make_card, self, height=200)
+        self.content = self.scroll.viewport()
         self.content.setObjectName("frontierContent")
-        self.rows = QVBoxLayout(self.content)
-        self.rows.setContentsMargins(2, 2, 8, 10)
-        self.rows.setSpacing(8)
-        self.rows.addStretch()
-        self.scroll.setWidget(self.content)
         root.addWidget(self.scroll, 1)
         self._apply_header_density(force_compact=True)
 
@@ -834,7 +876,6 @@ class DailyFrontierPage(QWidget):
         self.refresh_button.setToolTip(self._refresh_button_full_text)
 
     def _on_filter_changed(self, text: str) -> None:
-        self._render_limit = self._render_batch_size
         self._render()
         self.scroll.verticalScrollBar().setValue(0)
 
@@ -845,23 +886,79 @@ class DailyFrontierPage(QWidget):
 
     def reload(self) -> None:
         self.data = self._load_data()
+        self._persisted_snapshot = deepcopy(self.data)
+        self._loaded = True
         self._render()
+
+    def request_reload(self) -> None:
+        """Refresh stale data without making page navigation wait for it."""
+
+        if self._load_worker is not None and self._load_worker.isRunning():
+            return
+        worker = FrontierLoadThread(self)
+        generation = self._load_generation
+        worker.completed.connect(lambda data: self._apply_loaded_snapshot(data) if generation == self._load_generation else None)
+        worker.failed.connect(lambda message: self.status_label.setText(f"后台刷新失败：{message}"))
+        worker.finished.connect(self._release_load_worker)
+        self._load_worker = worker
+        worker.start(QThread.Priority.LowPriority)
+
+    def _apply_loaded_snapshot(self, data: object) -> None:
+        if not isinstance(data, dict):
+            return
+        self.data = data
+        self._persisted_snapshot = deepcopy(data)
+        self._loaded = True
+        self._render()
+
+    def _release_load_worker(self) -> None:
+        worker = self._load_worker
+        self._load_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        waiting = False
+        for worker in (
+            self._load_worker,
+            self._worker,
+            self._ai_worker,
+            self._profile_ai_worker,
+            self._comment_ai_worker,
+        ):
+            if worker is not None and worker.isRunning():
+                worker.requestInterruption()
+                waiting = True
+        if waiting:
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
+        super().closeEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt API
+        # Parent-window teardown does not deliver closeEvent to child pages.
+        # Stop the disposable snapshot loader so Qt never destroys a running
+        # child QThread.  User-started refreshes remain resumable in background.
+        if self._load_worker is not None and self._load_worker.isRunning():
+            self._load_worker.requestInterruption()
+        super().hideEvent(event)
 
     @staticmethod
     def _load_data() -> dict:
-        data = load_frontier_data()
-        data["profile"] = load_research_profile()
-        data["items"] = apply_frontier_ranking(
-            data.get("items", []),
-            data.get("profile", {}),
-            load_journal_library(),
-        )
-        return data
+        return _load_frontier_snapshot()
 
     def _persist_data(self) -> None:
+        self._load_generation += 1
         profile = self.data.get("profile", {})
         save_research_profile(profile if isinstance(profile, dict) else {})
-        save_frontier_data(self.data)
+        snapshot = deepcopy(self.data)
+        before = self._persisted_snapshot
+        self._persisted_snapshot = snapshot
+        self._save_sequence += 1
+        if os.environ.get("RESEARCH_ASSISTANT_DISABLE_BACKGROUND") == "1":
+            save_frontier_changes(before, snapshot)
+        else:
+            submit_database_write(f"frontier-edit-{self._save_sequence}", save_frontier_changes, before, snapshot)
 
     def auto_refresh_if_due(self) -> None:
         if self.auto_update_profile_if_due(refresh_after=True):
@@ -1087,6 +1184,11 @@ class DailyFrontierPage(QWidget):
             QTimer.singleShot(0, self._run_ai_rerank)
 
     def _refresh_finished(self, result: dict) -> None:
+        if result.get("cancelled"):
+            self.status_label.setText("后台更新已暂停，稍后将从检查点继续。")
+            if self.ai_progress is not None:
+                self.ai_progress.finish("已安全暂停")
+            return
         latest = {str(i["id"]): i for i in self.data.get("items", [])}
         latest_by_fingerprint = {
             work_fingerprint(item): item
@@ -1095,6 +1197,7 @@ class DailyFrontierPage(QWidget):
         }
         current_profile = self.data.get("profile", {})
         self.data = result["data"]
+        self._load_generation += 1
         self.data["profile"] = current_profile
         self.data["items"] = [
             merge_frontier_refresh_item(
@@ -1139,13 +1242,12 @@ class DailyFrontierPage(QWidget):
             self.data["last_notified"] = date.today().isoformat()
         if result.get("batch_id") and isinstance(result.get("runtime"), dict) and not result.get("already_succeeded"):
             save_research_profile(current_profile if isinstance(current_profile, dict) else {})
-            finalized = commit_frontier_v13_data(
-                self.data,
-                result["runtime"],
-                str(result["batch_id"]),
-                complete=not bool(errors),
-            )
-            result["runtime"] = finalized
+            self._persisted_snapshot = deepcopy(self.data)
+            arguments = (deepcopy(self.data), result["runtime"], str(result["batch_id"]))
+            if os.environ.get("RESEARCH_ASSISTANT_DISABLE_BACKGROUND") == "1":
+                result["runtime"] = commit_frontier_v13_data(*arguments, complete=not bool(errors))
+            else:
+                submit_database_write("frontier-refresh", commit_frontier_v13_data, *arguments, complete=not bool(errors))
             self._render()
             self.status_label.setText(status + " · " + self.status_label.text())
             self.changed.emit()
@@ -1292,16 +1394,8 @@ class DailyFrontierPage(QWidget):
         return "\n".join(part for part in parts if part) or "尚未设置。可在“研究设置 → 优先期刊”中选择必看或关注。"
 
     def _render(self) -> None:
-        while self.rows.count() > 1:
-            child = self.rows.takeAt(0)
-            widget = child.widget()
-            if widget:
-                # Do not retain invisible frontier cards between filtering or
-                # refreshes; stale cards can keep outdated size hints alive.
-                widget.setParent(None)
-                widget.deleteLater()
         visible = self._visible_items()
-        rendered = visible[: self._render_limit]
+        rendered = visible
         v13 = self._is_v13()
         checked = str(self.data.get("last_checked", ""))
         count_text = f"显示 {len(rendered)}/{len(visible)} 篇" if len(rendered) < len(visible) else f"当前 {len(visible)} 篇"
@@ -1312,50 +1406,40 @@ class DailyFrontierPage(QWidget):
         else:
             self.status_label.setText(f"{checked or '尚未检查'} · {count_text}")
         self._update_cache_hint()
-        previous_group: str | None = None
+        displayed = []
+        previous_bucket = None
         for item in rendered:
+            entry = dict(item)
             if v13 and self.filter_combo.currentText() == "今日推荐":
                 bucket = str(item.get("display_bucket", "today"))
-                group = bucket
-                if group != previous_group:
-                    bucket_name = "今日新增" if bucket == "today" else "此前未读"
-                    heading = QLabel(bucket_name)
-                    heading.setObjectName("frontierPyramidSection")
-                    heading.setToolTip("推荐按当天相对价值动态排序，不设固定篇数")
-                    self.rows.insertWidget(self.rows.count() - 1, heading)
-                    previous_group = group
-            card = FrontierCard(item)
-            card.add_reading_requested.connect(self._add_to_reading)
-            card.add_inspiration_requested.connect(self._add_to_inspiration)
-            card.relevant_requested.connect(self._mark_relevant)
-            card.irrelevant_requested.connect(self._mark_irrelevant)
-            card.too_broad_requested.connect(self._mark_too_broad)
-            card.read_requested.connect(self._mark_read)
-            card.restore_requested.connect(self._restore_recommendation)
-            card.feedback_requested.connect(self._record_feedback)
-            card.import_journal_requested.connect(self._import_journal)
-            card.detail_opened.connect(self._record_detail_open)
-            self.rows.insertWidget(self.rows.count() - 1, card)
-        if len(rendered) < len(visible):
-            load_more = QPushButton(f"继续加载（已显示 {len(rendered)} / {len(visible)}）")
-            load_more.setObjectName("frontierLoadMoreButton")
-            load_more.clicked.connect(self._load_more)
-            self.rows.insertWidget(self.rows.count() - 1, load_more)
+                if bucket != previous_bucket:
+                    entry["_section_label"] = "今日新增" if bucket == "today" else "此前未读"
+                    previous_bucket = bucket
+            displayed.append(entry)
+        self.scroll.set_records(displayed)
         if not visible:
-            self.status_label.hide()
             message = "今天暂无合适的新论文" if v13 and self.filter_combo.currentText() == "今日推荐" else "这里暂时没有论文"
-            empty = QLabel(message)
-            empty.setObjectName("emptyLabel")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.rows.insertWidget(0, empty)
+            self.status_label.setText(message)
         else:
             self.status_label.show()
 
-    def _load_more(self) -> None:
-        scroll_position = self.scroll.verticalScrollBar().value()
-        self._render_limit += self._render_batch_size
-        self._render()
-        QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(scroll_position))
+    def _make_card(self, item):
+        card = FrontierCard(item)
+        if item.get("_section_label"):
+            heading = QLabel(item["_section_label"])
+            heading.setObjectName("frontierPyramidSection")
+            card.layout().insertWidget(0, heading)
+        card.add_reading_requested.connect(self._add_to_reading)
+        card.add_inspiration_requested.connect(self._add_to_inspiration)
+        card.relevant_requested.connect(self._mark_relevant)
+        card.irrelevant_requested.connect(self._mark_irrelevant)
+        card.too_broad_requested.connect(self._mark_too_broad)
+        card.read_requested.connect(self._mark_read)
+        card.restore_requested.connect(self._restore_recommendation)
+        card.feedback_requested.connect(self._record_feedback)
+        card.import_journal_requested.connect(self._import_journal)
+        card.detail_opened.connect(self._record_detail_open)
+        return card
 
     def _open_settings(self) -> None:
         self._open_legacy_settings()

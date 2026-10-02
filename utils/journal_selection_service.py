@@ -235,7 +235,7 @@ def find_similar_works(
                 ],
             }
             rows.append(work)
-            cache.upsert_work(work)
+    cache.upsert_works(rows)
     own_doi = _doi(manuscript.get("doi", ""))
     own_title = canonical_text(manuscript.get("title", ""))
     result = [

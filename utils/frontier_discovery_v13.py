@@ -77,6 +77,9 @@ def normalize_issns(value: Any) -> list[str]:
 
 
 def _request_json(url: str, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> dict[str, Any]:
+    from PySide6.QtCore import QThread
+    if QThread.currentThread().isInterruptionRequested():
+        raise InterruptedError("发现任务已暂停")
     query = urlencode({key: value for key, value in (params or {}).items() if value not in {None, ""}})
     address = f"{url}?{query}" if query else url
     request_headers = {"Accept": "application/json", "User-Agent": USER_AGENT, **(headers or {})}
@@ -84,6 +87,8 @@ def _request_json(url: str, params: dict[str, Any] | None = None, headers: dict[
     try:
         with urlopen(request, timeout=20) as response:  # noqa: S310 - public fixed scholarly APIs
             value = json.loads(response.read().decode("utf-8"))
+        if QThread.currentThread().isInterruptionRequested():
+            raise InterruptedError("发现任务已暂停")
     except HTTPError as error:
         kind = "authentication" if error.code in {401, 403} else "rate_limit" if error.code == 429 else "http"
         raise RuntimeError(f"{kind}: HTTP {error.code}") from error
@@ -97,12 +102,18 @@ def _request_json(url: str, params: dict[str, Any] | None = None, headers: dict[
 
 
 def _request_bytes(url: str, params: dict[str, Any] | None = None) -> bytes:
+    from PySide6.QtCore import QThread
+    if QThread.currentThread().isInterruptionRequested():
+        raise InterruptedError("发现任务已暂停")
     query = urlencode({key: value for key, value in (params or {}).items() if value not in {None, ""}})
     address = f"{url}?{query}" if query else url
     request = Request(address, headers={"Accept": "application/atom+xml,application/rss+xml", "User-Agent": USER_AGENT})
     try:
         with urlopen(request, timeout=20) as response:  # noqa: S310 - user-owned journal feed or fixed public API
-            return response.read()
+            value = response.read()
+        if QThread.currentThread().isInterruptionRequested():
+            raise InterruptedError("发现任务已暂停")
+        return value
     except (HTTPError, URLError, TimeoutError) as error:
         raise RuntimeError(f"network: {error}") from error
 
@@ -627,6 +638,7 @@ def discover_frontier_candidates_v13(
     weekly_backfill: bool | None = None,
     source_filter: list[str] | None = None,
     progress: Any = None,
+    cancelled: Any = None,
     fetcher: Callable[[str, str, dict[str, Any], str, date, date, dict[str, Any]], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Execute every seeded lane and report failures independently."""
@@ -681,6 +693,8 @@ def discover_frontier_candidates_v13(
     blocked_sources: set[str] = set()
     attempted_strategies: set[str] = set()
     for index, (strategy, seed_job, source) in enumerate(jobs, start=1):
+        if cancelled and cancelled():
+            break
         if source_filter is not None and source not in source_filter:
             continue
         if source in blocked_sources:
@@ -780,8 +794,7 @@ def discover_frontier_candidates_v13(
             error="; ".join(value["error"] for value in errors if value["strategy"] == strategy)[:240],
         )
     items = merge_work_families(all_rows)
-    for item in items:
-        cache.upsert_work(item)
+    cache.upsert_works(items)
     emit(f"六路发现完成：{len(items)} 个去重成果", 100)
     return {
         "items": items,

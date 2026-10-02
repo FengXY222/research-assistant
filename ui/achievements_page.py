@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QUrl, Qt, Signal
+from PySide6.QtCore import QDate, QUrl, Qt, Signal, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
@@ -28,7 +28,8 @@ from PySide6.QtWidgets import (
 
 from ui.dialogs import confirm_delete, show_undo_toast
 from ui.page_kit import PageHeader
-from ui.reorder import OrderDragHandle, ReorderableColumn
+from ui.virtual_cards import VirtualCardList
+from ui.reorder import OrderDragHandle
 from utils.file_manager import ACHIEVEMENT_CATEGORIES, load_achievements, save_achievements
 
 
@@ -353,7 +354,11 @@ class AchievementsPage(QWidget):
         controls = QHBoxLayout()
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("搜索成果名称、载体或编号")
-        self.search_edit.textChanged.connect(self._render)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(180)
+        self._search_timer.timeout.connect(self._render)
+        self.search_edit.textChanged.connect(lambda: self._search_timer.start())
         controls.addWidget(self.search_edit, 1)
         self.filter_combo = QComboBox()
         self.filter_combo.addItems(["全部", *ACHIEVEMENT_CATEGORIES])
@@ -363,14 +368,10 @@ class AchievementsPage(QWidget):
         self.count_label = QLabel()
         self.count_label.setObjectName("sectionLabel")
         root.addWidget(self.count_label)
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.content = ReorderableColumn("achievements")
+        self.scroll = VirtualCardList(self._make_row, self, scope="achievements")
+        self.content = self.scroll.viewport()
         self.content.setObjectName("achievementContent")
-        self.content.order_changed.connect(self._reorder)
-        self.scroll.setWidget(self.content)
+        self.scroll.order_changed.connect(self._reorder)
         root.addWidget(self.scroll, 1)
 
     def _filtered(self) -> list[dict]:
@@ -387,21 +388,18 @@ class AchievementsPage(QWidget):
         return result
 
     def _render(self) -> None:
-        self.content.clear_rows()
         records = self._filtered()
         self.count_label.setText(f"共 {len(records)} 项成果")
-        for item in records:
-            row = AchievementRow(item)
-            row.edit_requested.connect(self._edit)
-            row.delete_requested.connect(self._delete)
-            row.open_pdf_requested.connect(self._open_pdf)
-            self.content.add_row(row, str(item.get("id", "")))
+        self.scroll.set_records(records)
         if not records:
-            empty = QLabel("还没有成果记录。论文在投稿记录中变为“已接收”或“已发表”时，会自动完整移入这里。")
-            empty.setObjectName("emptyLabel")
-            empty.setWordWrap(True)
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.content.set_placeholder(empty)
+            self.count_label.setText("还没有成果记录。已接收或已发表的论文会自动移入这里。")
+
+    def _make_row(self, item):
+        row = AchievementRow(item)
+        row.edit_requested.connect(self._edit)
+        row.delete_requested.connect(self._delete)
+        row.open_pdf_requested.connect(self._open_pdf)
+        return row
 
     def _find_index(self, item_id: str) -> int:
         return next((index for index, item in enumerate(self.items) if str(item.get("id", "")) == item_id), -1)

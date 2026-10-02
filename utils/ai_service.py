@@ -316,71 +316,11 @@ def _chat_content_from_response(raw: str) -> tuple[Any, str]:
 
 
 def _chat_json(config: dict[str, Any], api_key: str, system: str, payload: dict[str, Any], max_tokens: int) -> dict[str, Any]:
-    """Call DeepSeek JSON mode and retry one malformed/empty answer safely."""
-    base_url = str(config["base_url"]).rstrip("/")
-    endpoint = base_url if base_url.endswith("/chat/completions") else base_url + "/chat/completions"
-    body = {
-        "model": config["model"],
-        "messages": [
-            {"role": "system", "content": system + " 输出必须是一个 JSON 对象，不要使用 Markdown 代码块或额外说明。"},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ],
-        "response_format": {"type": "json_object"},
-        # Structured extraction does not need reasoning tokens. Disabling it
-        # avoids an otherwise valid request ending with an empty content field.
-        "thinking": {"type": "disabled"},
-        "temperature": 0.2,
-        "max_tokens": max_tokens,
-        "stream": False,
-    }
-    last_issue = ""
-    for attempt in range(2):
-        request_body = dict(body)
-        request_body["messages"] = list(body["messages"])
-        if attempt:
-            request_body["messages"].append(
-                {
-                    "role": "user",
-                    "content": "上一次输出无法读取。请严格只返回符合前述 schema 的单一 JSON 对象。",
-                }
-            )
-        encoded = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
-        request = Request(
-            endpoint,
-            data=encoded,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "ScientificAssistant/0.9",
-            },
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=45) as response:  # noqa: S310 - endpoint is explicitly configured by the user
-                raw = response.read().decode("utf-8", errors="replace")
-        except HTTPError as error:
-            raise DeepSeekRequestError(
-                f"DeepSeek 请求失败（HTTP {error.code}）。请检查 API Key、模型名称、余额或服务状态。"
-            ) from error
-        except URLError as error:
-            raise DeepSeekRequestError("无法连接 DeepSeek，请检查网络、API 地址或代理设置。") from error
-        except TimeoutError as error:
-            raise DeepSeekRequestError("DeepSeek 响应超时，请稍后重试。") from error
-        finish_reason = ""
-        try:
-            content, finish_reason = _chat_content_from_response(raw)
-            result = _parse_json_object(content)
-            if not isinstance(result, dict):
-                raise ValueError("not a JSON object")
-            return result
-        except DeepSeekRequestError:
-            raise
-        except (TypeError, ValueError, json.JSONDecodeError):
-            last_issue = "输出被截断" if finish_reason == "length" else "未返回可读取 JSON"
-            if attempt == 0:
-                continue
-    raise DeepSeekRequestError(f"DeepSeek 本次{last_issue or '未返回可读取 JSON'}，已自动重试一次；请稍后再试。")
+    from utils.ai_transport import request_json
+
+    return request_json(config, api_key, system, payload, max_tokens, urlopen=urlopen,
+        parse_content=_chat_content_from_response, parse_object=_parse_json_object,
+        DeepSeekRequestError=DeepSeekRequestError)
 
 
 _KEYWORD_METADATA_TOKENS = {
@@ -1219,6 +1159,7 @@ def classify_profile_comment_with_ai(
 def enrich_journals_with_ai(
     journals: list[dict[str, Any]],
     progress: Callable[..., None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Add cautious Chinese scope/fit notes; never overwrite verified metadata.
 
@@ -1258,6 +1199,15 @@ def enrich_journals_with_ai(
     updates: list[dict[str, Any]] = []
     failed_batches: list[str] = []
     for offset in range(0, len(submitted), 8):
+        if cancelled and cancelled():
+            return {
+                "updates": updates,
+                "model": config["model"],
+                "requested": len(submitted),
+                "failed_batches": failed_batches,
+                "cancelled": True,
+                "resume_offset": offset,
+            }
         batch = submitted[offset : offset + 8]
         batch_ids = {item["id"] for item in batch}
         emit(f"AI 正在补充期刊资料：第 {offset // 8 + 1} 批…", int(offset / max(1, len(submitted)) * 80))
@@ -1291,6 +1241,15 @@ def enrich_journals_with_ai(
         except DeepSeekRequestError as error:
             failed_batches.append(f"第 {offset // 8 + 1} 批：{error}")
             continue
+        if cancelled and cancelled():
+            return {
+                "updates": updates,
+                "model": config["model"],
+                "requested": len(submitted),
+                "failed_batches": failed_batches,
+                "cancelled": True,
+                "resume_offset": offset,
+            }
         values = result.get("journals", [])
         if not isinstance(values, list):
             for wrapper in ("data", "result", "output"):

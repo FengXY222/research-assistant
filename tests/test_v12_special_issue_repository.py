@@ -90,27 +90,33 @@ def test_save_load_roundtrip_and_data_root_switch(tmp_path: Path) -> None:
             }
         )
 
-        payload = json.loads(file_manager.SPECIAL_ISSUES_FILE.read_text(encoding="utf-8"))
+        payload = load_special_issue_store()
         assert payload["items"][0]["title"] == "Topical collection"
-        assert load_special_issue_store() == payload
-        assert "special_issues.json" in file_manager.BACKUP_FILE_NAMES
+        assert (tmp_path / "research_assistant.sqlite").is_file()
+        assert "research_assistant.sqlite" in file_manager.BACKUP_FILE_NAMES
+        assert "research_intelligence.sqlite" not in file_manager.BACKUP_FILE_NAMES
     finally:
         file_manager._set_data_dir(original)
 
 
-def test_failed_atomic_replace_preserves_original_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_failed_database_commit_preserves_original_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from utils import special_issue_repository as repository
+    from utils.app_data_store import AppDataStore
 
     original_root = file_manager.DATA_DIR
     try:
         file_manager._set_data_dir(tmp_path)
         repository.save_special_issue_store({"items": [{"id": "si-old", "status": "saved"}]})
-        original = file_manager.SPECIAL_ISSUES_FILE.read_bytes()
+        original = repository.load_special_issue_store()
 
-        monkeypatch.setattr(repository.os, "replace", lambda *_args: (_ for _ in ()).throw(OSError("blocked")))
+        monkeypatch.setattr(
+            AppDataStore,
+            "save_special_issues",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("blocked")),
+        )
         with pytest.raises(repository.SpecialIssueRepositoryError):
             repository.save_special_issue_store({"items": [{"id": "si-new", "status": "saved"}]})
 
-        assert file_manager.SPECIAL_ISSUES_FILE.read_bytes() == original
+        assert repository.load_special_issue_store() == original
     finally:
         file_manager._set_data_dir(original_root)

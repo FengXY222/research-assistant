@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import date
+import os
 from uuid import uuid4
 
-from PySide6.QtCore import QThread, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QDesktopServices, QFontMetrics
+from PySide6.QtCore import QAbstractListModel, QMimeData, QModelIndex, QRect, QSize, QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics, QPainter, QPalette
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -17,12 +19,16 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
@@ -55,6 +61,7 @@ from utils.easyscholar_service import (
 )
 from utils.file_manager import (
     journal_usage_index,
+    business_data_store,
     load_app_settings,
     load_frontier_data,
     load_journal_library,
@@ -103,6 +110,27 @@ class JournalMetadataThread(QThread):
             self.completed.emit(enrich_journal_library(self._journals))
         except Exception as error:
             self.failed.emit(str(error))
+
+
+class JournalLoadThread(QThread):
+    completed = Signal(object, object)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        if self.isInterruptionRequested():
+            return
+        try:
+            papers = load_papers()
+            store = business_data_store()
+            if not store.has_dataset("journals"):
+                sync_journal_library_from_papers(papers)
+            journals = store.journal_summaries() if store.has_dataset("journals") else load_journal_library()
+        except Exception as error:  # noqa: BLE001 - cached rows remain visible
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(error))
+            return
+        if not self.isInterruptionRequested():
+            self.completed.emit(journals, papers)
 
 
 class JournalJcrThread(QThread):
@@ -156,6 +184,7 @@ class JournalAiEnrichmentThread(QThread):
                 enrich_journals_with_ai(
                     self._journals,
                     lambda message, value=0: self.progress.emit(str(message), int(value or 0)),
+                    cancelled=self.isInterruptionRequested,
                 )
             )
         except (DeepSeekConfigurationError, DeepSeekRequestError) as error:
@@ -795,6 +824,258 @@ class JournalLibraryRow(QFrame):
         root.addLayout(actions)
 
 
+class JournalListModel(QAbstractListModel):
+    """Lightweight journal rows; no QWidget is created per record."""
+
+    order_changed = Signal(list)
+    EntryRole = int(Qt.ItemDataRole.UserRole) + 1
+    JournalRole = EntryRole + 1
+    MimeType = "application/x-research-assistant-journal-row"
+
+    def __init__(self, parent: QWidget | None = None, *, batch_size: int = 40) -> None:
+        super().__init__(parent)
+        self._entries: list[dict] = []
+        self._visible_count = 0
+        self._batch_size = max(10, int(batch_size))
+        self._reorder_enabled = False
+        self._provider = None
+        self._provider_offset = 0
+        self._provider_total = 0
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802 - Qt API
+        return 0 if parent.isValid() else min(self._visible_count, len(self._entries))
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):  # noqa: ANN001
+        if not index.isValid() or not 0 <= index.row() < self.rowCount():
+            return None
+        entry = self._entries[index.row()]
+        if role == self.EntryRole:
+            return entry
+        if role == self.JournalRole:
+            return entry.get("journal") if entry.get("kind") == "journal" else None
+        if role == Qt.ItemDataRole.DisplayRole:
+            if entry.get("kind") == "group":
+                return f"{entry.get('name', '')}  ·  {entry.get('count', 0)}"
+            if entry.get("kind") == "empty":
+                return str(entry.get("text", ""))
+            return str(entry.get("journal", {}).get("name", "未命名期刊"))
+        if role == Qt.ItemDataRole.ToolTipRole and entry.get("kind") == "journal":
+            journal = entry.get("journal", {})
+            return "\n".join(
+                value
+                for value in (
+                    str(journal.get("name", "")),
+                    str(journal.get("publisher", "")),
+                    compact_metric_line(journal),
+                )
+                if value
+            )
+        return None
+
+    def flags(self, index: QModelIndex):  # noqa: ANN001
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        entry = self._entries[index.row()]
+        flags = Qt.ItemFlag.ItemIsEnabled
+        if entry.get("kind") == "journal":
+            flags |= Qt.ItemFlag.ItemIsSelectable
+            if self._reorder_enabled:
+                flags |= Qt.ItemFlag.ItemIsDragEnabled | Qt.ItemFlag.ItemIsDropEnabled
+        return flags
+
+    def supportedDropActions(self):  # noqa: N802 - Qt API
+        return Qt.DropAction.MoveAction
+
+    def mimeTypes(self) -> list[str]:  # noqa: N802 - Qt API
+        return [self.MimeType]
+
+    def mimeData(self, indexes: list[QModelIndex]) -> QMimeData:  # noqa: N802 - Qt API
+        payload = QMimeData()
+        index = next((value for value in indexes if value.isValid()), QModelIndex())
+        entry = self.entry_at(index)
+        if self._reorder_enabled and entry and entry.get("kind") == "journal":
+            payload.setData(self.MimeType, str(entry["journal"].get("id", "")).encode("utf-8"))
+        return payload
+
+    def dropMimeData(self, data: QMimeData, action, row: int, column: int, parent: QModelIndex) -> bool:  # noqa: N802, ANN001
+        del column
+        if not self._reorder_enabled or action != Qt.DropAction.MoveAction or not data.hasFormat(self.MimeType):
+            return False
+        journal_id = bytes(data.data(self.MimeType)).decode("utf-8", errors="ignore")
+        source = next(
+            (
+                index
+                for index, entry in enumerate(self._entries)
+                if entry.get("kind") == "journal" and str(entry.get("journal", {}).get("id", "")) == journal_id
+            ),
+            -1,
+        )
+        if source < 0:
+            return False
+        destination = row if row >= 0 else parent.row() if parent.isValid() else len(self._entries)
+        destination = max(1, min(destination, len(self._entries)))
+        if destination in {source, source + 1}:
+            return False
+        qt_destination = destination
+        self.beginMoveRows(QModelIndex(), source, source, QModelIndex(), qt_destination)
+        entry = self._entries.pop(source)
+        if destination > source:
+            destination -= 1
+        self._entries.insert(destination, entry)
+        self.endMoveRows()
+        self.order_changed.emit(
+            [
+                str(value.get("journal", {}).get("id", ""))
+                for value in self._entries
+                if value.get("kind") == "journal"
+            ]
+        )
+        return True
+
+    def canFetchMore(self, parent: QModelIndex = QModelIndex()) -> bool:  # noqa: N802 - Qt API
+        if self._provider is not None:
+            return not parent.isValid() and self._provider_offset < self._provider_total
+        return not parent.isValid() and self._visible_count < len(self._entries)
+
+    def fetchMore(self, parent: QModelIndex = QModelIndex()) -> None:  # noqa: N802 - Qt API
+        if parent.isValid() or not self.canFetchMore(parent):
+            return
+        if self._provider is not None:
+            entries, fetched, total = self._provider(self._provider_offset, self._batch_size)
+            self._provider_total = total
+            self._provider_offset += fetched
+            if not entries:
+                self._provider_offset = total
+                return
+            start = len(self._entries)
+            self.beginInsertRows(QModelIndex(), start, start + len(entries) - 1)
+            self._entries.extend(entries)
+            self._visible_count = len(self._entries)
+            self.endInsertRows()
+            return
+        start = self._visible_count
+        end = min(len(self._entries), start + self._batch_size)
+        self.beginInsertRows(QModelIndex(), start, end - 1)
+        self._visible_count = end
+        self.endInsertRows()
+
+    def set_entries(self, entries: list[dict], *, reorder_enabled: bool = False) -> None:
+        self._provider = None
+        self.beginResetModel()
+        self._entries = list(entries)
+        self._visible_count = min(len(self._entries), self._batch_size)
+        self._reorder_enabled = bool(reorder_enabled)
+        self.endResetModel()
+
+    def set_provider(self, provider, *, reorder_enabled=False):
+        entries, fetched, total = provider(0, self._batch_size)
+        self.beginResetModel()
+        self._provider = provider
+        self._provider_offset = fetched
+        self._provider_total = total
+        self._entries = entries
+        self._visible_count = len(entries)
+        self._reorder_enabled = reorder_enabled
+        self.endResetModel()
+
+    def entry_at(self, index: QModelIndex) -> dict | None:
+        if not index.isValid() or not 0 <= index.row() < self.rowCount():
+            return None
+        return self._entries[index.row()]
+
+    def update_journal(self, journal: dict) -> bool:
+        journal_id = str(journal.get("id", ""))
+        for row, entry in enumerate(self._entries):
+            if entry.get("kind") != "journal":
+                continue
+            if str(entry.get("journal", {}).get("id", "")) != journal_id:
+                continue
+            entry["journal"] = journal
+            if row < self.rowCount():
+                index = self.index(row, 0)
+                self.dataChanged.emit(index, index, [self.EntryRole, self.JournalRole, Qt.ItemDataRole.DisplayRole])
+            return True
+        return False
+
+
+class JournalItemDelegate(QStyledItemDelegate):
+    """Paint compact journal cards directly into the viewport."""
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:  # noqa: N802 - Qt API
+        entry = index.data(JournalListModel.EntryRole) or {}
+        if entry.get("kind") == "group":
+            return QSize(max(120, option.rect.width()), 32)
+        if entry.get("kind") == "empty":
+            return QSize(max(120, option.rect.width()), 70)
+        return QSize(max(120, option.rect.width()), 68)
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        painter.save()
+        entry = index.data(JournalListModel.EntryRole) or {}
+        rect = option.rect.adjusted(2, 2, -3, -2)
+        # The application stylesheet intentionally makes scroll-area viewports
+        # transparent.  Qt consequently reports a black ``Base`` role on the
+        # QListView palette even in the light theme.  Using that view-local
+        # role made every virtual journal card look disabled/dark grey.  The
+        # application palette remains the authoritative semantic palette.
+        application = QApplication.instance()
+        palette = application.palette() if application is not None else option.palette
+        if entry.get("kind") == "group":
+            painter.setPen(palette.color(QPalette.ColorRole.Highlight))
+            font = QFont(option.font)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(rect.adjusted(7, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter, str(index.data()))
+            painter.restore()
+            return
+        if entry.get("kind") == "empty":
+            painter.setPen(palette.color(QPalette.ColorRole.PlaceholderText))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, str(index.data()))
+            painter.restore()
+            return
+
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        background = palette.color(
+            QPalette.ColorRole.Highlight if selected else QPalette.ColorRole.AlternateBase
+        )
+        border = palette.color(QPalette.ColorRole.Dark)
+        border.setAlpha(150)
+        painter.setPen(border)
+        painter.setBrush(background)
+        painter.drawRoundedRect(rect, 7, 7)
+
+        journal = entry.get("journal", {})
+        model = journal_row_model(journal)
+        left = rect.left() + 10
+        right = rect.right() - 8
+        title_rect = QRect(left, rect.top() + 7, max(40, right - left - 132), 23)
+        title_font = QFont(option.font)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(palette.color(QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Text))
+        title = ("★ " if journal.get("favorite") else "") + str(model.get("name", "未命名期刊"))
+        painter.drawText(title_rect, Qt.AlignmentFlag.AlignVCenter, QFontMetrics(title_font).elidedText(title, Qt.TextElideMode.ElideRight, title_rect.width()))
+
+        detail_font = QFont(option.font)
+        detail_font.setPointSize(max(7, detail_font.pointSize() - 1))
+        painter.setFont(detail_font)
+        detail_color = palette.color(QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Mid)
+        painter.setPen(detail_color)
+        detail = " · ".join(value for value in (str(model.get("publisher", "")), str(model.get("tags", ""))) if value)
+        detail_rect = QRect(left, rect.top() + 34, max(40, right - left - 10), 22)
+        painter.drawText(detail_rect, Qt.AlignmentFlag.AlignVCenter, QFontMetrics(detail_font).elidedText(detail, Qt.TextElideMode.ElideRight, detail_rect.width()))
+
+        quality = journal_quality_snapshot(journal)
+        jcr = primary_jcr_quartile(journal) or "待核验"
+        cas = compact_cas_quartile(quality.get("cas_upgrade", "") or quality.get("cas_basic", "")) or "待核验"
+        chip = f"JCR {jcr}  ·  中科院 {cas}"
+        chip_rect = QRect(max(left, right - 126), rect.top() + 7, 126, 23)
+        painter.setFont(detail_font)
+        painter.setPen(palette.color(QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Link))
+        painter.drawText(chip_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, chip)
+        painter.restore()
+
+
 class JournalLibraryPage(QWidget):
     changed = Signal()
     settings_center_requested = Signal(str)
@@ -802,9 +1083,11 @@ class JournalLibraryPage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.journals: list[dict] = []
+        self._loaded = False
         self.usage: dict[str, dict] = {}
         self._usage_by_name: dict[str, dict] = {}
         self._metadata_worker: JournalMetadataThread | None = None
+        self._load_worker: JournalLoadThread | None = None
         self._metadata_target_ids: set[str] | None = None
         self._metadata_purpose = "metadata"
         self._jcr_worker: JournalJcrThread | None = None
@@ -820,7 +1103,25 @@ class JournalLibraryPage(QWidget):
         self._search_render_timer.setInterval(240)
         self._search_render_timer.timeout.connect(self._render)
         self._build_ui()
-        self.reload()
+        self._render()
+        if os.environ.get("RESEARCH_ASSISTANT_DISABLE_BACKGROUND") == "1":
+            self.reload()
+        else:
+            self._show_notice("正在后台载入期刊库…")
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().showEvent(event)
+        if not self._loaded:
+            if self.journals:
+                self._loaded = True
+                return
+            if self.window() is self:
+                self.reload()
+                return
+            if os.environ.get("RESEARCH_ASSISTANT_DISABLE_BACKGROUND") == "1":
+                self.reload()
+            else:
+                self.request_reload()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -874,21 +1175,24 @@ class JournalLibraryPage(QWidget):
         self.ai_progress = AiProgressPanel(object_name="journalLibraryAiProgress")
         root.addWidget(self.ai_progress)
 
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        content = QWidget()
-        content.setObjectName("paperContent")
-        self.rows = QVBoxLayout(content)
-        # Keep the compact shelf exactly within a narrow scroll viewport; the
-        # one-pixel reserve avoids a horizontal bar when the publisher badge
-        # is present.
-        self.rows.setContentsMargins(2, 2, 5, 10)
-        self.rows.setSpacing(8)
-        self.rows.addStretch()
-        self.scroll.setWidget(content)
-        root.addWidget(self.scroll, 1)
+        self.journal_model = JournalListModel(self, batch_size=40)
+        self.journal_view = QListView()
+        self.journal_view.setObjectName("journalVirtualList")
+        self.journal_view.setModel(self.journal_model)
+        self.journal_view.setItemDelegate(JournalItemDelegate(self.journal_view))
+        self.journal_view.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
+        self.journal_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.journal_view.setSelectionMode(QListView.SelectionMode.SingleSelection)
+        self.journal_view.setToolTip("双击期刊可编辑；右键可收藏、更新资料或删除")
+        self.journal_view.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.journal_view.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.journal_model.order_changed.connect(self._reorder_journals)
+        self.journal_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.journal_view.customContextMenuRequested.connect(self._show_journal_menu)
+        self.journal_view.doubleClicked.connect(self._open_journal_index)
+        # Compatibility alias for code that only needs to scroll the page.
+        self.scroll = self.journal_view
+        root.addWidget(self.journal_view, 1)
         self._adapt_compact_layout(force=True)
 
     def _adapt_compact_layout(self, *, force: bool = False) -> None:
@@ -903,14 +1207,61 @@ class JournalLibraryPage(QWidget):
     def reload(self) -> None:
         papers = load_papers()
         sync_journal_library_from_papers(papers)
-        self.journals = load_journal_library()
-        self.usage = journal_usage_index(papers)
+        self._apply_loaded_library(load_journal_library(), papers)
+
+    def request_reload(self) -> None:
+        if self._load_worker is not None and self._load_worker.isRunning():
+            return
+        worker = JournalLoadThread(self)
+        worker.completed.connect(self._apply_loaded_library)
+        worker.failed.connect(lambda message: self._show_notice(f"后台刷新失败：{message}"))
+        worker.finished.connect(self._release_load_worker)
+        self._load_worker = worker
+        worker.start(QThread.Priority.LowPriority)
+
+    def _release_load_worker(self) -> None:
+        worker = self._load_worker
+        self._load_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        waiting = False
+        for worker in (
+            self._load_worker,
+            self._metadata_worker,
+            self._jcr_worker,
+            self._easy_worker,
+            self._ai_worker,
+        ):
+            if worker is not None and worker.isRunning():
+                worker.requestInterruption()
+                waiting = True
+        if waiting:
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
+        super().closeEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._load_worker is not None and self._load_worker.isRunning():
+            self._load_worker.requestInterruption()
+        super().hideEvent(event)
+
+    def _apply_loaded_library(self, journals: object, papers: object) -> None:
+        self.journals = [row for row in journals if isinstance(row, dict)] if isinstance(journals, list) else []
+        self._database_paging = bool(self.journals and self.journals[0].get("_summary"))
+        self._loaded = True
+        paper_rows = [row for row in papers if isinstance(row, dict)] if isinstance(papers, list) else []
+        self.usage = journal_usage_index(paper_rows)
         self._usage_by_name = {}
         for key, value in self.usage.items():
             name = str(key).split("|", 1)[0]
             if name and name not in self._usage_by_name:
                 self._usage_by_name[name] = value
         self._render()
+        if self.notice_label.text() == "正在后台载入期刊库…":
+            self._show_notice("")
 
     def _schedule_render(self, *_args) -> None:
         """Coalesce rapid search edits into one shelf rebuild."""
@@ -971,49 +1322,88 @@ class JournalLibraryPage(QWidget):
 
     def _render(self) -> None:
         self._search_render_timer.stop()
-        while self.rows.count() > 1:
-            child = self.rows.takeAt(0)
-            widget = child.widget()
-            if widget:
-                # Detach immediately so a just-refreshed page cannot retain
-                # stale child size hints until Qt processes deferred deletes.
-                widget.setParent(None)
-                widget.deleteLater()
+        if getattr(self, "_database_paging", False):
+            self._render_database_shelf()
+            return
         journals = self._filtered()
         self.count_label.setText(f"共 {len(journals)} 本期刊")
         # Row-level green/red status marks communicate verification at the
         # point of use.  Avoid a second prose health summary above the shelf.
         self.health_label.clear()
-        allow_manual_order = self.group_combo.currentText() == "全部期刊"
+        entries: list[dict] = []
         for group_name, group_journals in self._grouped(journals):
-            heading = QLabel(f"{group_name}  ·  {len(group_journals)}")
-            heading.setObjectName("journalGroupHeading")
-            self.rows.insertWidget(self.rows.count() - 1, heading)
-            # A grouped column must size to its rows. Its own trailing stretch
-            # previously absorbed the viewport height and created large blank
-            # gaps between publisher groups.
-            group_rows = ReorderableColumn("journals", include_stretch=False)
-            group_rows.setObjectName("journalGroupRows")
-            # Theme typography can change a child's construction-time size
-            # hint by a few pixels. The shelf owns the available width, so
-            # recompute rows inside the viewport instead of widening the
-            # scroll content beyond it.
-            group_rows.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
-            if allow_manual_order:
-                group_rows.order_changed.connect(self._reorder_journals)
+            entries.append({"kind": "group", "name": group_name, "count": len(group_journals)})
             for journal in group_journals:
-                row = CompactJournalRow(journal, movable=allow_manual_order)
-                row.edit_requested.connect(self._edit_journal)
-                row.delete_requested.connect(self._delete_journal)
-                row.favorite_requested.connect(self._toggle_favorite)
-                row.metadata_requested.connect(self._request_metadata_for_id)
-                group_rows.add_row(row, str(journal.get("id", "")))
-            self.rows.insertWidget(self.rows.count() - 1, group_rows)
+                entries.append({"kind": "journal", "journal": journal})
         if not journals:
-            empty = QLabel("期刊库还没有记录。添加期刊，或先在投稿记录中保存一条期刊经历。")
-            empty.setObjectName("emptyLabel")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.rows.insertWidget(0, empty)
+            entries.append(
+                {
+                    "kind": "empty",
+                    "text": "期刊库还没有记录。添加期刊，或先在投稿记录中保存一条期刊经历。",
+                }
+            )
+        self.journal_model.set_entries(
+            entries,
+            reorder_enabled=self.group_combo.currentText() == "全部期刊" and not bool(self.search_edit.text().strip()),
+        )
+
+    def _render_database_shelf(self):
+        store = business_data_store()
+        search, category, group = self.search_edit.text(), self.filter_combo.currentText(), self.group_combo.currentText()
+        used = tuple(self._usage_by_name)
+        last_group = [None]
+        def page(offset, limit):
+            records, count, groups = store.journal_shelf_page(offset=offset, limit=limit,
+                search=search, category=category, group=group, used_names=used)
+            entries = []
+            for record in records:
+                name = "全部期刊" if group == "全部期刊" else (record.get("fields") or ["未分类"])[0] if group == "按标签" else str(record.get("publisher") or "未分类")
+                if name != last_group[0]:
+                    entries.append({"kind": "group", "name": name, "count": groups.get(name, count)})
+                    last_group[0] = name
+                entries.append({"kind": "journal", "journal": record})
+            self.count_label.setText(f"共 {count} 本期刊")
+            return entries, len(records), count
+        self.health_label.clear()
+        self.journal_model.set_provider(page, reorder_enabled=group == "全部期刊" and not search.strip())
+
+    def _ensure_full_library(self):
+        if getattr(self, "_database_paging", False):
+            self.journals = load_journal_library()
+            self._database_paging = False
+
+    def _journal_from_index(self, index: QModelIndex) -> dict | None:
+        entry = self.journal_model.entry_at(index)
+        if not isinstance(entry, dict) or entry.get("kind") != "journal":
+            return None
+        journal = entry.get("journal")
+        return journal if isinstance(journal, dict) else None
+
+    def _open_journal_index(self, index: QModelIndex) -> None:
+        journal = self._journal_from_index(index)
+        if journal is not None:
+            self._edit_journal(str(journal.get("id", "")))
+
+    def _show_journal_menu(self, position) -> None:  # noqa: ANN001 - Qt point type
+        index = self.journal_view.indexAt(position)
+        journal = self._journal_from_index(index)
+        if journal is None:
+            return
+        journal_id = str(journal.get("id", ""))
+        menu = QMenu(self.journal_view)
+        copy_name = menu.addAction("复制期刊名")
+        copy_name.triggered.connect(lambda: QApplication.clipboard().setText(str(journal.get("name", ""))))
+        menu.addSeparator()
+        edit = menu.addAction("编辑")
+        edit.triggered.connect(lambda: self._edit_journal(journal_id))
+        favorite = menu.addAction("取消收藏" if journal.get("favorite") else "收藏")
+        favorite.triggered.connect(lambda: self._toggle_favorite(journal_id))
+        update = menu.addAction("更新资料")
+        update.triggered.connect(lambda: self._request_metadata_for_id(journal_id))
+        menu.addSeparator()
+        remove = menu.addAction("删除")
+        remove.triggered.connect(lambda: self._delete_journal(journal_id))
+        menu.exec(self.journal_view.viewport().mapToGlobal(position))
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1044,9 +1434,11 @@ class JournalLibraryPage(QWidget):
         ]
 
     def _find_index(self, journal_id: str) -> int:
+        self._ensure_full_library()
         return next((index for index, item in enumerate(self.journals) if str(item.get("id")) == journal_id), -1)
 
     def _add_journal(self) -> None:
+        self._ensure_full_library()
         dialog = JournalLibraryDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             journal = dialog.journal()
@@ -1081,6 +1473,7 @@ class JournalLibraryPage(QWidget):
             self._enrich_metadata({journal_id})
 
     def _enrich_metadata(self, journal_ids: set[str] | None = None, *, force: bool = False, purpose: str = "metadata") -> None:
+        self._ensure_full_library()
         if self._metadata_worker is not None and self._metadata_worker.isRunning():
             return
         if not self.journals:
@@ -1112,6 +1505,7 @@ class JournalLibraryPage(QWidget):
         self._metadata_worker.start()
 
     def _enrich_incomplete_metadata(self) -> None:
+        self._ensure_full_library()
         target = {
             str(journal.get("id", ""))
             for journal in self.journals
@@ -1127,6 +1521,7 @@ class JournalLibraryPage(QWidget):
         self._enrich_metadata(target)
 
     def _validate_publishers(self) -> None:
+        self._ensure_full_library()
         target = self._filtered()
         if not target:
             self._show_notice("当前筛选下没有期刊可进行出版社校验。")
@@ -1138,6 +1533,7 @@ class JournalLibraryPage(QWidget):
 
     def _update_changed_journals(self) -> None:
         """Run a quota-aware health pass; stable records are explicitly skipped."""
+        self._ensure_full_library()
         model = str(get_ai_settings().get("model", "")).strip()
         targets = journal_health_targets(self.journals, model=model, today=date.today().isoformat())
         if not targets:
@@ -1179,6 +1575,7 @@ class JournalLibraryPage(QWidget):
         self._sync_tools_enabled()
 
     def _verify_jcr(self) -> None:
+        self._ensure_full_library()
         if self._jcr_worker is not None and self._jcr_worker.isRunning():
             return
         if not is_jcr_ready():
@@ -1220,6 +1617,7 @@ class JournalLibraryPage(QWidget):
 
     def _update_easyscholar(self, journal_ids: set[str] | None = None) -> None:
         """Refresh only changed or stale journal identities from EasyScholar."""
+        self._ensure_full_library()
         if self._easy_worker is not None and self._easy_worker.isRunning():
             return
         if not is_easyscholar_ready():
@@ -1247,6 +1645,7 @@ class JournalLibraryPage(QWidget):
 
     def auto_update_easyscholar_if_due(self) -> bool:
         """At most once daily, check newly added or stale journal identities."""
+        self._ensure_full_library()
         if self._easy_worker is not None and self._easy_worker.isRunning():
             return False
         if not is_easyscholar_ready():
@@ -1320,6 +1719,7 @@ class JournalLibraryPage(QWidget):
         self._sync_tools_enabled()
 
     def _enrich_with_ai(self) -> None:
+        self._ensure_full_library()
         if self._ai_worker is not None and self._ai_worker.isRunning():
             return
         if not is_deepseek_ready("journal_enrichment"):
@@ -1342,6 +1742,7 @@ class JournalLibraryPage(QWidget):
 
     def auto_enrich_new_if_due(self) -> bool:
         """Once a day, enrich only journals deliberately marked as newly added."""
+        self._ensure_full_library()
         if self._ai_worker is not None and self._ai_worker.isRunning():
             return False
         ai_settings = get_ai_settings()
@@ -1434,8 +1835,12 @@ class JournalLibraryPage(QWidget):
         failed_batches = list(result.get("failed_batches", []))
         if failed_batches:
             message += f" {len(failed_batches)} 批未完成，可稍后对当前筛选重试。"
+        if result.get("cancelled"):
+            message += " 后台补全已安全暂停，未处理的期刊仍保留待补状态。"
         self._show_notice(message)
-        self.ai_progress.complete("AI 期刊资料补充完成。")
+        self.ai_progress.complete(
+            "AI 期刊资料补充已暂停。" if result.get("cancelled") else "AI 期刊资料补充完成。"
+        )
 
     def _ai_enrichment_failed(self, message: str) -> None:
         prefix = "期刊自动补全失败：" if self._ai_automatic else "DeepSeek 补全失败："
@@ -1524,6 +1929,7 @@ class JournalLibraryPage(QWidget):
             dialog.mark_action_complete(action, True, message)
 
     def _choose_for_paper(self) -> None:
+        self._ensure_full_library()
         papers = load_papers()
         if not papers:
             QMessageBox.information(self, "暂无论文", "请先在论文投稿记录中创建一篇论文，再为它选择目标期刊。")
@@ -1568,7 +1974,12 @@ class JournalLibraryPage(QWidget):
         if index < 0:
             return
         self.journals[index]["favorite"] = not bool(self.journals[index].get("favorite"))
-        self._save()
+        save_journal_library(self.journals)
+        if self.filter_combo.currentText() == "已收藏":
+            self._render()
+        else:
+            self.journal_model.update_journal(self.journals[index])
+        self.changed.emit()
 
     def _delete_journal(self, journal_id: str) -> None:
         index = self._find_index(journal_id)
@@ -1590,6 +2001,7 @@ class JournalLibraryPage(QWidget):
         )
 
     def _restore_journal(self, index: int, journal: dict) -> None:
+        self._ensure_full_library()
         if any(str(item.get("id", "")) == str(journal.get("id", "")) for item in self.journals):
             return
         self.journals.insert(min(index, len(self.journals)), journal)
@@ -1604,6 +2016,7 @@ class JournalLibraryPage(QWidget):
         self.changed.emit()
 
     def _reorder_journals(self, ordered_ids: list[str]) -> None:
+        self._ensure_full_library()
         ordered_set = set(ordered_ids)
         by_id = {str(journal.get("id", "")): journal for journal in self.journals}
         ordered_journals = iter([by_id[item_id] for item_id in ordered_ids if item_id in by_id])

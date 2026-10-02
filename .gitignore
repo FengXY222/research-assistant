@@ -23,6 +23,7 @@ dist/
 # Personal and test data
 data/
 .qa-user-data/
+.qa-library-switch/
 .test-data/
 .test-results/
 tmp/
@@ -38,3 +39,5 @@ docs/qa/
 .vscode/
 Thumbs.db
 Desktop.ini
+components/pdf_translator/runtime/
+components/pdf_translator/download-cache/

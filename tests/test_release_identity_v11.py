@@ -22,12 +22,17 @@ STABLE_FORMAL_DATA = Path(os.environ["LOCALAPPDATA"]) / APP_NAME / "UserData"
 
 class ReleaseIdentityV12Tests(TestCase):
     def test_every_release_identity_declares_v12(self) -> None:
-        self.assertEqual(APP_VERSION, "13.1.3")
+        self.assertEqual(APP_VERSION, "13.1.9")
         self.assertEqual(MIN_SUPPORTED_DATA_VERSION, "10.0")
-        self.assertIn(f'#define MyAppVersion "{APP_VERSION}"', ISS.read_text(encoding="utf-8"))
+        installer = ISS.read_text(encoding="utf-8")
+        self.assertIn(f'#define MyAppVersion "{APP_VERSION}"', installer)
+        for directive in ("VersionInfoVersion", "VersionInfoProductVersion"):
+            self.assertIn(f"{directive}={{#MyAppVersion}}.0", installer)
+        for directive in ("VersionInfoTextVersion", "VersionInfoProductTextVersion"):
+            self.assertIn(f"{directive}={{#MyAppVersion}}", installer)
         self.assertIn(f'$appVersion = "{APP_VERSION}"', BUILD.read_text(encoding="utf-8"))
         version_info = VERSION_INFO.read_text(encoding="utf-8")
-        self.assertIn("filevers=(13, 1, 3, 0)", version_info)
+        self.assertIn("filevers=(13, 1, 9, 0)", version_info)
         self.assertIn(APP_NAME, version_info)
 
     def test_installer_keeps_existing_data_when_upgrading_in_place(self) -> None:

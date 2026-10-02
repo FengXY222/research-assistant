@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $appName = ([char]0x79d1).ToString() + [char]0x7814 + [char]0x52a9 + [char]0x624b
-$appVersion = "13.1.3"
+$appVersion = "13.1.9"
 $issFile = Join-Path $PSScriptRoot ($appName + ".iss")
 $buildEnvironment = Join-Path $PSScriptRoot ".build-venv"
 $pythonPath = Join-Path $buildEnvironment "Scripts\python.exe"
@@ -43,10 +43,8 @@ if (-not $buildPythonReady) {
     if ($LASTEXITCODE -ne 0) { throw "创建或修复隔离打包环境失败，已停止打包。" }
 }
 
-& $pythonPath -m pip install -r (Join-Path $PSScriptRoot "requirements.txt")
+& $pythonPath -m pip install -r (Join-Path $PSScriptRoot "requirements-build.lock")
 if ($LASTEXITCODE -ne 0) { throw "依赖安装失败，已停止打包。" }
-& $pythonPath -m pip install pyinstaller
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller 安装失败，已停止打包。" }
 
 $originalPath = $env:PATH
 $pathEntries = @(
@@ -85,6 +83,7 @@ try {
         "--hidden-import", "ui.frontier_page",
         "--hidden-import", "ui.special_issue_page",
         "--hidden-import", "ui.achievements_page",
+        "--hidden-import", "ui.tools_page",
         "--collect-data", "rapidocr",
         "--collect-binaries", "ctranslate2"
     )
@@ -95,6 +94,7 @@ try {
         "--add-data", $bundledFontData,
         "--add-data", $bundledIconData,
         "--add-data", $bundledTranslationData,
+        "--add-data", "components/pdf_translator/worker.py;components/pdf_translator",
         "--version-file", "version_info.txt",
         "--name", $appName
     )
@@ -111,6 +111,10 @@ try {
 
 $packagedAppPath = Join-Path $PSScriptRoot ("dist\" + $appName)
 $packagedDataPath = Join-Path $packagedAppPath "data"
+if (-not $OneFile) {
+    & (Join-Path $PSScriptRoot "components\pdf_translator\build_portable.ps1") -Destination (Join-Path $packagedAppPath "components\pdf_translator\runtime")
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "components\pdf_translator\README.md") -Destination (Join-Path $packagedAppPath "components\pdf_translator\README.md") -Force
+}
 if (Test-Path -LiteralPath $packagedDataPath) {
     throw "构建产物不应包含用户 data 目录，已停止生成安装包。"
 }

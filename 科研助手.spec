@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_dynamic_libs
 
-datas = [('assets/fonts/NotoSansCJKsc-Regular.otf', 'assets/fonts'), ('assets/icons/lucide', 'assets/icons/lucide'), ('assets/translation/opus-mt-en-zh', 'assets/translation/opus-mt-en-zh')]
+datas = [('assets/fonts/NotoSansCJKsc-Regular.otf', 'assets/fonts'), ('assets/icons/lucide', 'assets/icons/lucide'), ('assets/translation/opus-mt-en-zh', 'assets/translation/opus-mt-en-zh'), ('components/pdf_translator/worker.py', 'components/pdf_translator')]
 binaries = []
 datas += collect_data_files('rapidocr')
 binaries += collect_dynamic_libs('ctranslate2')
@@ -13,7 +13,7 @@ a = Analysis(
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=['win32crypt', 'rapidocr.main', 'onnxruntime', 'pypdfium2', 'ctranslate2', 'sentencepiece', 'ui.todo_page', 'ui.paper_page', 'ui.notes_page', 'ui.journal_library_page', 'ui.frontier_page', 'ui.special_issue_page', 'ui.achievements_page'],
+    hiddenimports=['win32crypt', 'rapidocr.main', 'onnxruntime', 'pypdfium2', 'ctranslate2', 'sentencepiece', 'ui.todo_page', 'ui.paper_page', 'ui.notes_page', 'ui.journal_library_page', 'ui.frontier_page', 'ui.special_issue_page', 'ui.achievements_page', 'ui.tools_page'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

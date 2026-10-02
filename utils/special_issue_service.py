@@ -18,10 +18,14 @@ from urllib.request import Request
 
 from utils.api_rate_limit import rate_limited_urlopen as urlopen
 
+from utils.app_data_store import compact_deadline_candidates
 from utils.evidence_cache import EvidenceCache
 from utils.journal_quality import journal_quality_snapshot
 from utils.publisher_utils import canonical_publisher
 from utils.special_issue_policy import aggregator_is_fresh, local_datetime, open_eligibility
+
+
+_SQLITE_INCREMENTAL_REFRESH_THRESHOLD = 500
 
 
 _TYPE_ALIASES = {
@@ -362,8 +366,18 @@ def _merge_record(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]
         result['id_aliases'] = list(dict.fromkeys([*left.get('id_aliases', []), *right.get('id_aliases', []), right['id']]))
     incoming_deadline = _parse_deadline(right.get('deadline'))
     if incoming_deadline and incoming_deadline != result.get('deadline'):
-        result['deadline_candidates'] = _unique_dicts([*result.get('deadline_candidates', []),
-            {'deadline': incoming_deadline, 'source_evidence': deepcopy(right.get('source_evidence', [])), 'fetched_at': right.get('fetched_at', '')}])
+        result['deadline_candidates'] = compact_deadline_candidates(
+            [
+                *result.get('deadline_candidates', []),
+                {
+                    'deadline': incoming_deadline,
+                    'source': right.get('source_id', right.get('source', '')),
+                    'source_evidence': deepcopy(right.get('source_evidence', [])),
+                    'fetched_at': right.get('fetched_at', ''),
+                },
+            ],
+            limit=10,
+        )
     for field in ("title", "journal", "publisher", "fee_mode", "official_url", "official_checked_at"):
         current = str(result.get(field, "")).strip()
         incoming = str(right.get(field, "")).strip()
@@ -953,7 +967,6 @@ def refresh_special_issues(
     from utils.special_issue_repository import (
         load_special_issue_store,
         normalize_special_issue_store,
-        save_special_issue_store,
         begin_special_issue_refresh,
         commit_special_issue_refresh,
     )
@@ -976,8 +989,39 @@ def refresh_special_issues(
         except TypeError:
             progress(message)
 
-    refresh_token = begin_special_issue_refresh() if persist else None
-    before = normalize_special_issue_store(store if store is not None else refresh_token["store"] if refresh_token else load_special_issue_store())
+    incremental_database = None
+    if persist:
+        if store is None:
+            candidate_database = file_manager.business_data_store()
+            if candidate_database.special_issue_count() >= _SQLITE_INCREMENTAL_REFRESH_THRESHOLD:
+                incremental_database = candidate_database
+                incremental_store = candidate_database.begin_special_issue_refresh_incremental()
+                refresh_token = {
+                    "generation": int(incremental_store.get("refresh_generation", 0)),
+                    "store": incremental_store,
+                }
+            else:
+                refresh_token = begin_special_issue_refresh()
+        else:
+            refresh_token = begin_special_issue_refresh()
+    else:
+        refresh_token = None
+    before = normalize_special_issue_store(
+        store
+        if store is not None
+        else refresh_token["store"]
+        if refresh_token
+        else load_special_issue_store()
+    )
+
+    def commit_refresh(value: dict[str, Any], *, state: str | None = None) -> dict[str, Any]:
+        if incremental_database is not None:
+            return incremental_database.commit_special_issue_refresh_incremental(
+                value,
+                generation=int(refresh_token["generation"]),
+                state=str(state or value.get("last_refresh_status", "running")),
+            )
+        return commit_special_issue_refresh(value, token=refresh_token)
     library = journal_library if journal_library is not None else file_manager.load_journal_library()
     paper_rows = papers if papers is not None else file_manager.load_papers()
     if research_profile is None:
@@ -1142,7 +1186,19 @@ def refresh_special_issues(
                         "last_refresh_status": "running",
                     }
                 )
-                before = commit_special_issue_refresh(shard_patch, token=refresh_token)
+                committed = commit_refresh(shard_patch, state="running")
+                if incremental_database is None:
+                    before = committed
+                else:
+                    before = normalize_special_issue_store(
+                        {
+                            **before,
+                            **committed,
+                            "items": merge_special_issue_records(
+                                [*before.get("items", []), *normalized_rows]
+                            ),
+                        }
+                    )
 
         shard_callback_enabled = False
         try:
@@ -1232,7 +1288,7 @@ def refresh_special_issues(
             {**before, "source_checkpoints": source_checkpoints, "last_refresh_status": "cancelled"}
         )
         if persist:
-            cancelled_store = commit_special_issue_refresh(cancelled_store, token=refresh_token)
+            cancelled_store = commit_refresh(cancelled_store, state="cancelled")
         return {
             "store": cancelled_store,
             "notifications": [],
@@ -1241,14 +1297,16 @@ def refresh_special_issues(
     if source_rows and attempted_sources == 0:
         paused_store = normalize_special_issue_store({**before, "source_checkpoints": source_checkpoints})
         if persist:
-            paused_store = commit_special_issue_refresh(paused_store, token=refresh_token)
+            paused_store = commit_refresh(paused_store, state="paused")
         return {
             "store": paused_store,
             "notifications": [],
             "stats": {"raw": 0, "discovered": 0, "items": 0, "eligible": 0},
         }
     all_attempted_failed = bool(source_outcomes and all(value == "failed" for value in source_outcomes))
-    has_prior_results = bool(before.get("items"))
+    has_prior_results = bool(
+        before.get("items") or int(before.get("total_item_count", 0) or 0)
+    )
     has_prior_successful_source = any(
         isinstance(value, dict) and str(value.get("status", "")).casefold() == "success"
         for source_id, value in source_checkpoints.items()
@@ -1275,7 +1333,7 @@ def refresh_special_issues(
             {**before, "source_checkpoints": source_checkpoints, "last_refresh_status": "partial"}
         )
         if persist:
-            retained_store = commit_special_issue_refresh(retained_store, token=refresh_token)
+            retained_store = commit_refresh(retained_store, state="partial")
         retained_items = [value for value in retained_store.get("items", []) if isinstance(value, dict)]
         retained_visible = sum(
             bool(evaluate_special_issue(value, now=now, view="recommended").get("visible"))
@@ -1288,7 +1346,12 @@ def refresh_special_issues(
         return {
             "store": retained_store,
             "notifications": [],
-            "stats": {"raw": fetched_raw, "discovered": 0, "items": len(retained_items), "eligible": retained_visible},
+            "stats": {
+                "raw": fetched_raw,
+                "discovered": 0,
+                "items": int(retained_store.get("total_item_count", len(retained_items))),
+                "eligible": retained_visible,
+            },
         }
     backfill_only = bool(all_attempted_failed and refresh_status == "partial" and needs_ai_backfill)
     if refresh_status == "failed":
@@ -1296,7 +1359,7 @@ def refresh_special_issues(
             {**before, "source_checkpoints": source_checkpoints, "last_refresh_status": "failed"}
         )
         if persist:
-            failed_store = commit_special_issue_refresh(failed_store, token=refresh_token)
+            failed_store = commit_refresh(failed_store, state="failed")
         cache.put_job_checkpoint(
             "special_issue_refresh",
             {"checked_at": now.isoformat(timespec="seconds"), "status": "failed", "discovered": len(discovered)},
@@ -1306,6 +1369,25 @@ def refresh_special_issues(
             "notifications": [],
             "stats": {"raw": fetched_raw, "discovered": len(discovered), "items": 0, "eligible": 0},
         }
+    if incremental_database is not None and discovered:
+        existing_rows = incremental_database.load_special_issues_for_refresh(
+            [
+                key
+                for value in discovered
+                for key in (value.get("id"), value.get("dedupe_key"))
+                if str(key or "").strip()
+            ]
+        )
+        known_ids = {
+            str(value.get("id", ""))
+            for value in before.get("items", [])
+            if isinstance(value, dict)
+        }
+        before["items"].extend(
+            value
+            for value in existing_rows
+            if str(value.get("id", "")) not in known_ids
+        )
     merged = merge_special_issue_records([*before.get("items", []), *discovered])
     all_merged = deepcopy(merged)
     if candidate_limit > 0 and len(merged) > candidate_limit:
@@ -1424,7 +1506,7 @@ def refresh_special_issues(
             {**before, "source_checkpoints": source_checkpoints, "last_refresh_status": "cancelled"}
         )
         if persist:
-            cancelled_store = commit_special_issue_refresh(cancelled_store, token=refresh_token)
+            cancelled_store = commit_refresh(cancelled_store, state="cancelled")
         return {
             "store": cancelled_store,
             "notifications": [],
@@ -1606,7 +1688,7 @@ def refresh_special_issues(
             {**before, "source_checkpoints": source_checkpoints, "last_refresh_status": "cancelled"}
         )
         if persist:
-            cancelled_store = commit_special_issue_refresh(cancelled_store, token=refresh_token)
+            cancelled_store = commit_refresh(cancelled_store, state="cancelled")
         return {
             "store": cancelled_store,
             "notifications": [],
@@ -1650,7 +1732,7 @@ def refresh_special_issues(
             outbox.append({**notification, "state": "pending", "created_at": at})
     after["notification_outbox"] = outbox[-500:]
     if persist:
-        after = commit_special_issue_refresh(after, token=refresh_token)
+        after = commit_refresh(after, state=refresh_status)
     cache.put_job_checkpoint(
         "special_issue_refresh",
         {"checked_at": at, "discovered": len(discovered), "retained": len(matched), "notifications": len(notifications)},
@@ -1662,7 +1744,7 @@ def refresh_special_issues(
         "stats": {
             "raw": fetched_raw,
             "discovered": len(discovered),
-            "items": len(after.get("items", [])),
+            "items": int(after.get("total_item_count", len(after.get("items", [])))),
             "eligible": recommended_count,
         },
     }

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import threading
 
 
 MODEL_DIR = Path(__file__).resolve().parents[1] / "assets" / "translation" / "opus-mt-en-zh"
 _TRANSLATOR = None
 _SOURCE_MODEL = None
 _TARGET_MODEL = None
+_MODEL_LOCK = threading.RLock()
+_UNLOAD_TIMER = None
 _ACADEMIC_GLOSSARY = {
     "soc": "土壤有机碳（SOC）",
     "maoc": "矿物结合态有机碳（MAOC）",
@@ -118,18 +121,42 @@ def _runtime():
     return _TRANSLATOR, _SOURCE_MODEL, _TARGET_MODEL
 
 
-def translate_en_to_zh(texts: list[str]) -> list[str]:
+def _translate_en_to_zh(texts: list[str]) -> list[str]:
     """Translate English with the bundled Helsinki-NLP OPUS-MT model."""
-    translator, source_model, target_model = _runtime()
     output: list[str] = []
     for text in texts:
         exact = glossary_translation(text)
         if exact:
             output.append(exact)
             continue
+        if not str(text or "").strip():
+            output.append("")
+            continue
+        translator, source_model, target_model = _runtime()
         chunks = _chunks(text)
         tokenized = [source_model.encode(chunk, out_type=str) + ["</s>"] for chunk in chunks]
         max_length = max(64, min(256, max((len(value) for value in tokenized), default=1) * 4))
         batches = translator.translate_batch(tokenized, beam_size=4, max_decoding_length=max_length)
         output.append("\n".join(target_model.decode(result.hypotheses[0]).strip() for result in batches).strip())
     return output
+
+
+def release_translation_model() -> None:
+    global _TRANSLATOR, _SOURCE_MODEL, _TARGET_MODEL
+    with _MODEL_LOCK:
+        _TRANSLATOR = _SOURCE_MODEL = _TARGET_MODEL = None
+
+
+def translate_en_to_zh(texts: list[str]) -> list[str]:
+    """Serialize model access and release an unused model after two minutes."""
+    global _UNLOAD_TIMER
+    with _MODEL_LOCK:
+        if _UNLOAD_TIMER is not None:
+            _UNLOAD_TIMER.cancel()
+        try:
+            return _translate_en_to_zh(texts)
+        finally:
+            if _TRANSLATOR is not None:
+                _UNLOAD_TIMER = threading.Timer(120, release_translation_model)
+                _UNLOAD_TIMER.daemon = True
+                _UNLOAD_TIMER.start()

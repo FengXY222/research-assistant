@@ -41,6 +41,7 @@ class V12ProfilePageIntegrationTests(TestCase):
             patch("ui.frontier_page.load_research_profile", return_value=independent),
         ):
             page = DailyFrontierPage()
+            page.reload()
 
         self.assertEqual(page.data["profile"]["terms"][0]["canonical_en"], "soil organic carbon")
         page.close()
@@ -52,13 +53,20 @@ class V12ProfilePageIntegrationTests(TestCase):
             patch("ui.frontier_page.load_research_profile", return_value=profile),
         ):
             page = DailyFrontierPage()
+            page.reload()
         with (
-            patch("ui.frontier_page.save_frontier_data") as save_frontier,
+            patch("ui.frontier_page.save_frontier_changes") as save_frontier,
             patch("ui.frontier_page.save_research_profile") as save_profile,
+            patch("ui.frontier_page.submit_database_write") as submit_write,
+            patch.dict(os.environ, {"RESEARCH_ASSISTANT_DISABLE_BACKGROUND": "0"}),
         ):
             page._persist_data()
 
-        save_frontier.assert_called_once_with(page.data)
+        self.assertEqual(submit_write.call_count, 1)
+        self.assertTrue(submit_write.call_args.args[0].startswith("frontier-edit-"))
+        self.assertIs(submit_write.call_args.args[1], save_frontier)
+        self.assertEqual(submit_write.call_args.args[3], page.data)
+        save_frontier.assert_not_called()
         save_profile.assert_called_once_with(page.data["profile"])
         page.close()
 
@@ -94,6 +102,7 @@ class V12ProfilePageIntegrationTests(TestCase):
             patch("ui.frontier_page.load_research_profile", return_value=profile),
         ):
             page = DailyFrontierPage()
+            page.reload()
         restored = {"terms": [{"canonical_en": "original term"}], "auto_organization_suppressed_for_date": "2026-08-31"}
 
         with (
@@ -115,6 +124,7 @@ class V12ProfilePageIntegrationTests(TestCase):
             patch("ui.frontier_page.load_research_profile", return_value={"terms": []}),
         ):
             page = DailyFrontierPage()
+            page.reload()
         page.data["items"] = [
             {
                 "id": "frontier-1",

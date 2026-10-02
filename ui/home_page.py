@@ -19,7 +19,7 @@ from ui.page_kit import PageHeader
 
 from utils.file_manager import (
     load_achievements,
-    load_frontier_data,
+    load_frontier_preview_data,
     load_inspirations,
     load_papers,
     load_readings,
@@ -683,7 +683,7 @@ class HomePage(QWidget):
         self.metrics_container.updateGeometry()
 
     def _refresh_frontier_brief(self) -> None:
-        data = load_frontier_data()
+        data = load_frontier_preview_data()
         top = select_daily_recommendations(data.get("items", []), data.get("profile", {}))
         if not top:
             self.frontier_brief_label.setText("今日暂无新的匹配论文；可前往“每日前沿”检查更新。")

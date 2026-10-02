@@ -25,7 +25,8 @@ from PySide6.QtWidgets import (
 
 from ui.dialogs import confirm_delete, show_undo_toast
 from ui.page_kit import PageHeader
-from ui.reorder import OrderDragHandle, ReorderableColumn
+from ui.reorder import OrderDragHandle
+from ui.virtual_cards import VirtualCardList
 from utils.file_manager import load_inspirations, load_readings, save_inspirations, save_readings
 from ui.workflow_dialogs import LinkInspirationDialog, ResearchInboxDialog
 
@@ -171,7 +172,7 @@ class InspirationPanel(QFrame):
         header.addWidget(add)
         root.addLayout(header)
 
-        self.list_box = ReorderableColumn("inspirations")
+        self.list_box = VirtualCardList(self._make_inspiration_row, self, height=120, scope="inspirations")
         self.list_box.order_changed.connect(self._reorder)
         root.addWidget(self.list_box)
 
@@ -183,19 +184,17 @@ class InspirationPanel(QFrame):
         self._save()
 
     def _render(self) -> None:
-        self.list_box.clear_rows()
-        if not self.items:
-            empty = QLabel("还没有灵感便签。把闪过的研究想法留在这里。")
-            empty.setObjectName("cardHint")
-            self.list_box.set_placeholder(empty)
-            return
-        for item in self.items:
-            row = InspirationRow(item)
-            row.edit_requested.connect(self._edit)
-            row.delete_requested.connect(self._remove)
-            row.task_requested.connect(self._convert_to_task)
-            row.paper_requested.connect(self._convert_to_paper)
-            self.list_box.add_row(row, str(item.get("id", "")))
+        self.list_box.setFixedHeight(min(300, max(80, len(self.items) * 120)))
+        self.list_box.set_records(self.items)
+        self.list_box.set_empty_text("还没有灵感便签。把闪过的研究想法留在这里。")
+
+    def _make_inspiration_row(self, item):
+        row = InspirationRow(item)
+        row.edit_requested.connect(self._edit)
+        row.delete_requested.connect(self._remove)
+        row.task_requested.connect(self._convert_to_task)
+        row.paper_requested.connect(self._convert_to_paper)
+        return row
 
     def reload(self) -> None:
         self.items = load_inspirations()
@@ -466,7 +465,7 @@ class NotesPage(QWidget):
         add.clicked.connect(self._add_reading)
         header.addWidget(add)
         reading_root.addLayout(header)
-        self.reading_box = ReorderableColumn("readings")
+        self.reading_box = VirtualCardList(self._make_reading_row, self, height=120, scope="readings")
         self.reading_box.order_changed.connect(self._reorder_readings)
         reading_root.addWidget(self.reading_box)
         root.addWidget(reading_card)
@@ -476,18 +475,16 @@ class NotesPage(QWidget):
         outer.addWidget(self.scroll)
 
     def _render_readings(self) -> None:
-        self.reading_box.clear_rows()
-        if not self.readings:
-            empty = QLabel("还没有待读记录。把以后想读的论文放在这里。")
-            empty.setObjectName("cardHint")
-            self.reading_box.set_placeholder(empty)
-            return
-        for item in self.readings:
-            row = ReadingRow(item)
-            row.status_requested.connect(self._toggle_status)
-            row.edit_requested.connect(self._edit_reading)
-            row.delete_requested.connect(self._delete_reading)
-            self.reading_box.add_row(row, str(item.get("id", "")))
+        self.reading_box.setFixedHeight(min(300, max(80, len(self.readings) * 120)))
+        self.reading_box.set_records(self.readings)
+        self.reading_box.set_empty_text("还没有待读记录。把以后想读的论文放在这里。")
+
+    def _make_reading_row(self, item):
+        row = ReadingRow(item)
+        row.status_requested.connect(self._toggle_status)
+        row.edit_requested.connect(self._edit_reading)
+        row.delete_requested.connect(self._delete_reading)
+        return row
 
     def _find_index(self, item_id: str) -> int:
         return next((index for index, item in enumerate(self.readings) if item.get("id") == item_id), -1)

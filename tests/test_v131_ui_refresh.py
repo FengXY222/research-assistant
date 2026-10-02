@@ -68,7 +68,7 @@ class V131UiRefreshTests(TestCase):
         self.addCleanup(window._visibility_hotkey.close)
         self.addCleanup(window.deleteLater)
 
-        self.assertEqual([button.text() for button in window._nav_buttons], ["概览", "工作", "论文", "文献"])
+        self.assertEqual([button.text() for button in window._nav_buttons], ["概览", "工作", "论文", "文献", "工具"])
         self.assertTrue(all(not button.icon().isNull() for button in window._nav_buttons))
         self.assertEqual(len(window.findChildren(PageHeader)), 1)
         _ = (

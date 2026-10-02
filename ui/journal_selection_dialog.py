@@ -34,8 +34,8 @@ from utils.ai_service import (
     DeepSeekRequestError,
 )
 from utils.evidence_cache import EvidenceCache
+from utils import file_manager
 from utils.file_manager import (
-    RESEARCH_INTELLIGENCE_CACHE_FILE,
     load_rejection_archive,
     selection_excluded_journal_names,
 )
@@ -64,7 +64,7 @@ class JournalSelectionAiThread(QThread):
 
     def run(self) -> None:
         try:
-            cache = EvidenceCache(RESEARCH_INTELLIGENCE_CACHE_FILE)
+            cache = EvidenceCache(file_manager.RESEARCH_INTELLIGENCE_CACHE_FILE)
             cache.initialize()
             result = run_selection_rounds(
                 self._paper,

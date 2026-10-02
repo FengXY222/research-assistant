@@ -1,5 +1,5 @@
 #define MyAppName "科研助手"
-#define MyAppVersion "13.1.3"
+#define MyAppVersion "13.1.9"
 #define MyAppPublisher "个人科研工作台"
 #define MyAppExeName "科研助手.exe"
 
@@ -7,14 +7,18 @@
 AppId={{2B8D0B17-2B66-4A1A-AF83-4F6CF2DF1A92}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+VersionInfoVersion={#MyAppVersion}.0
+VersionInfoTextVersion={#MyAppVersion}
+VersionInfoProductVersion={#MyAppVersion}.0
+VersionInfoProductTextVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 UsePreviousAppDir=yes
 DefaultGroupName={#MyAppName}
 PrivilegesRequired=lowest
 OutputDir=dist
-OutputBaseFilename=科研助手-v13.1.3-安装包
-Compression=lzma
+OutputBaseFilename=科研助手-v13.1.9-安装包
+Compression=lzma2/normal
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -34,6 +38,7 @@ Source: "dist\科研助手\*"; DestDir: "{app}"; Flags: ignoreversion recursesub
 
 [InstallDelete]
 Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\components\pdf_translator\runtime"
 Type: files; Name: "{app}\_internal\icuuc.dll"
 Type: files; Name: "{app}\_internal\icudt*.dll"
 

@@ -29,7 +29,7 @@ from utils.frontier_scoring import (
     select_daily_mix,
     select_daily_recommendations_v11,
 )
-from utils.file_manager import RESEARCH_INTELLIGENCE_CACHE_FILE
+from utils import file_manager
 from utils.easyscholar_service import is_easyscholar_ready
 from utils.journal_quality import journal_quality_snapshot
 from utils.research_signal_service import build_profile_view
@@ -1410,7 +1410,7 @@ def discover_frontier_candidates(
                 )
                 if work is not None:
                     all_rows.append(work)
-                    cache.upsert_work(work)
+    cache.upsert_works(all_rows)
     # Exclusions are contextual admission decisions, never substring deletion.
     result = dedupe_works(all_rows)
     emit(f"多源检索完成，共保留 {len(result)} 篇去重论文", 100)
@@ -1643,7 +1643,7 @@ def update_daily_frontier_v12(
             "ai_search_terms": deepcopy(profile.get("ai_search_terms", [])),
         }
     )
-    cache = EvidenceCache(RESEARCH_INTELLIGENCE_CACHE_FILE)
+    cache = EvidenceCache(file_manager.RESEARCH_INTELLIGENCE_CACHE_FILE)
     cache.initialize()
     emit("共享证据缓存已就绪", 5)
     previous_items = {str(i["id"]): i for i in original.get("items", [])
@@ -1751,10 +1751,10 @@ def update_daily_frontier_v13(
     progress: Any = None,
     manual: bool = False,
     now: datetime | None = None,
+    cancelled: Any = None,
 ) -> dict[str, Any]:
     """Run the v13 six-lane pipeline without requiring AI or fixed quotas."""
 
-    from utils import file_manager
     from utils.frontier_discovery_v13 import discover_frontier_candidates_v13
     from utils.source_registry import normalize_source_settings
     from utils.v13_pipeline import (
@@ -1836,14 +1836,40 @@ def update_daily_frontier_v13(
         manual=bool(retry_filter) or manual,
     )
     file_manager.save_v13_runtime(runtime)
+
+    def is_cancelled() -> bool:
+        return bool(cancelled and cancelled())
+
+    def cancelled_result(stage: str) -> dict[str, Any]:
+        nonlocal runtime
+        runtime = checkpoint(runtime, batch_id, stage, state="cancelled", now=now)
+        file_manager.save_v13_runtime(runtime)
+        return {
+            "data": original,
+            "new_count": 0,
+            "visible_count": sum(
+                1
+                for value in original.get("items", [])
+                if isinstance(value, dict) and value.get("candidate_state") == "visible"
+            ),
+            "brief": "后台更新已暂停，稍后将从检查点继续。",
+            "errors": [],
+            "runtime": runtime,
+            "batch_id": batch_id,
+            "cancelled": True,
+        }
+
     start_stage = resume_stage(runtime, batch_id)
     emit("正在准备六类独立发现通道…", 2)
+
+    if is_cancelled():
+        return cancelled_result(start_stage)
 
     if STAGE_INDEX(start_stage) <= STAGE_INDEX("recall"):
         runtime = checkpoint(runtime, batch_id, "recall", state="running", now=now)
         file_manager.save_v13_runtime(runtime)
         source_filter = retry_filter if retry_filter else None
-        cache = EvidenceCache(RESEARCH_INTELLIGENCE_CACHE_FILE)
+        cache = EvidenceCache(file_manager.RESEARCH_INTELLIGENCE_CACHE_FILE)
         cache.initialize()
         discovered = discover_frontier_candidates_v13(
             profile_view,
@@ -1854,7 +1880,10 @@ def update_daily_frontier_v13(
             now=now,
             source_filter=source_filter,
             progress=lambda message, value=0: emit(str(message), 3 + int((value or 0) * 0.3)),
+            cancelled=is_cancelled,
         )
+        if is_cancelled():
+            return cancelled_result("recall")
         if retry_filter:
             discovered["recall_outcomes"] = _merge_retry_recall_outcomes(
                 original.get("recall_outcomes", {}),
@@ -1883,6 +1912,8 @@ def update_daily_frontier_v13(
             journals,
             progress=lambda message, value=0: emit(str(message), 36 + int((value or 0) * 0.12)),
         )
+        if is_cancelled():
+            return cancelled_result("enrich")
         runtime = checkpoint(runtime, batch_id, "enrich", payload={"items": enriched}, state="success", now=now)
         file_manager.save_v13_runtime(runtime)
     else:
@@ -1901,6 +1932,8 @@ def update_daily_frontier_v13(
             "notified_at", "version_update_notified_at",
         )
         for item in merged:
+            if is_cancelled():
+                return cancelled_result("deduplicate")
             fingerprint = work_fingerprint(item)
             prior = previous_by_fingerprint.get(fingerprint)
             if prior:
@@ -1930,6 +1963,8 @@ def update_daily_frontier_v13(
         fingerprints = [dict(value) for value in original.get("fingerprints", []) if isinstance(value, dict)]
         fingerprint_index = {str(value.get("fingerprint", "")): value for value in fingerprints if str(value.get("fingerprint", ""))}
         for item in merged:
+            if is_cancelled():
+                return cancelled_result("filter")
             fingerprint = work_fingerprint(item)
             if not str(item.get("title", "")).strip():
                 if fingerprint:
@@ -1959,6 +1994,8 @@ def update_daily_frontier_v13(
         )
         prepared: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
         for raw in filtered:
+            if is_cancelled():
+                return cancelled_result("score")
             journal = journal_by_name.get(canonical_text(raw.get("journal", "")))
             if journal:
                 raw["priority"] = str(journal.get("frontier_priority", raw.get("priority", "")))
@@ -1993,6 +2030,8 @@ def update_daily_frontier_v13(
             return item
 
         for raw, journal in prepared:
+            if is_cancelled():
+                return cancelled_result("score")
             item = assess(raw, journal, raw.get("ai_axis_payload"))
             if item["candidate_state"] == "content_deleted_fingerprint_kept":
                 decision_fingerprint = work_fingerprint(item)
@@ -2046,6 +2085,8 @@ def update_daily_frontier_v13(
                 chunk_size = FRONTIER_AI_BATCH_SIZE
                 consecutive_transport_failures = 0
                 for offset in range(0, len(ai_candidates), chunk_size):
+                    if is_cancelled():
+                        return cancelled_result("score")
                     chunk = ai_candidates[offset : offset + chunk_size]
                     emit(
                         f"AI 正在复核候选论文（{offset + 1}-{offset + len(chunk)}/{len(ai_candidates)}）…",
@@ -2068,6 +2109,8 @@ def update_daily_frontier_v13(
                             row["circuit_open"] = True
                             break
                         continue
+                    if is_cancelled():
+                        return cancelled_result("score")
                     consecutive_transport_failures = 0
                     returned_ids: set[str] = set()
                     for patch in response.get("ranked", []) if isinstance(response, dict) else []:
@@ -2145,10 +2188,8 @@ def update_daily_frontier_v13(
             if item.get("candidate_state") == "content_deleted_fingerprint_kept":
                 continue
             final_items.append(display_by_id.get(str(item.get("id", "")), item))
-        # The SQLite evidence store remains the complete candidate pool.  The
-        # JSON document only keeps user-visible/user-owned rows and the active
-        # fuzzy-boundary working set; otherwise one discovery run can add tens
-        # of megabytes of hidden cards to every subsequent load.
+        # Durable candidates and scores are independent of disposable HTTP cache.
+        file_manager.business_data_store().save_frontier_candidates(final_items)
         compacted_items: list[dict[str, Any]] = []
         offloaded_count = 0
         for item in final_items:
@@ -2175,7 +2216,7 @@ def update_daily_frontier_v13(
         candidate_pool_summary = {
             "stored_in_json": len(final_items),
             "offloaded_to_sqlite": offloaded_count,
-            "full_pool_backend": "research_intelligence.sqlite",
+            "full_pool_backend": "research_assistant.sqlite/app_frontier_candidates",
         }
         runtime = checkpoint(
             runtime,
@@ -2209,6 +2250,7 @@ def update_daily_frontier_v13(
     brief += "。"
     stored_profile = deepcopy(profile)
     stored_profile.pop("authored_papers", None)
+    from utils.frontier_diagnostics import run_summary
     result_data = {
         **original,
         "profile": stored_profile,
@@ -2228,6 +2270,9 @@ def update_daily_frontier_v13(
         "ai_review": ai_review_summary,
         "candidate_pool": candidate_pool_summary,
         "last_batch_id": batch_id,
+        "run_summary": run_summary(batch_id=batch_id, at=now.isoformat(timespec="seconds"),
+            recalled=len(discovered.get("items", [])), filtered=len(filtered), candidates=final_items,
+            visible=visible, ai=ai_review_summary, pool=candidate_pool_summary, errors=errors, levels=levels),
     }
     emit("每日前沿 13.0 已完成评分，正在事务提交…", 98)
     return {

@@ -15,9 +15,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ui.motion import animate_widget_enter
-
-
 @dataclass(frozen=True)
 class RouteTarget:
     workbench: str
@@ -30,6 +27,7 @@ ROUTE_ALIASES: dict[str, RouteTarget] = {
     "work": RouteTarget("work", "tasks"),
     "todo": RouteTarget("work", "tasks"),
     "notes": RouteTarget("work", "notes"),
+    "tools": RouteTarget("work", "tools"),
     "papers": RouteTarget("papers", "submissions"),
     "achievements": RouteTarget("papers", "results"),
     "library": RouteTarget("library", "frontier"),
@@ -51,10 +49,11 @@ def resolve_route(route: str | RouteTarget, anchor: str | None = None) -> RouteT
 class WorkbenchShell(QWidget):
     """Own one set of pages and present it as a single compact widget stack."""
 
+    navigation_requested = Signal(str, str)
     route_changed = Signal(str, str)
 
     _SECTIONS = {
-        "work": (("tasks", "今日任务"), ("notes", "灵感与待读")),
+        "work": (("tasks", "今日任务"), ("notes", "灵感与待读"), ("tools", "工具")),
         "papers": (("submissions", "投稿记录"), ("results", "成果")),
         "library": (("frontier", "每日前沿"), ("journals", "期刊库"), ("special_issues", "特刊征稿")),
     }
@@ -145,6 +144,7 @@ class WorkbenchShell(QWidget):
         page_keys = {
             "tasks": "todo",
             "notes": "notes",
+            "tools": "tools",
             "submissions": "papers",
             "results": "achievements",
             "journals": "journals",
@@ -164,7 +164,13 @@ class WorkbenchShell(QWidget):
             chip.setCheckable(True)
             chip.setProperty("workbench_anchor", anchor)
             chip.setProperty("accent", anchor)
-            chip.clicked.connect(lambda _checked=False, value=anchor: self.navigate(workbench, value))
+            # The main window owns lazy-page creation, dirty-page refresh and
+            # navigation bookkeeping.  Never bypass it from a child tab.
+            chip.clicked.connect(
+                lambda _checked=False, value=anchor: self.navigation_requested.emit(
+                    workbench, value
+                )
+            )
             chip_layout.addWidget(chip)
         chip_layout.addStretch(1)
         root.addWidget(chips)
@@ -181,14 +187,11 @@ class WorkbenchShell(QWidget):
             if target.workbench in self._inner_stacks:
                 inner, anchors = self._inner_stacks[target.workbench]
                 inner.setCurrentIndex(anchors.get(target.anchor, 0))
-                animate_widget_enter(inner.currentWidget(), distance=3, duration_ms=150)
                 panel = self._primary_stack.widget(primary_index)
                 for button in panel.findChildren(QPushButton):
                     value = str(button.property("workbench_anchor") or "")
                     if value:
                         button.setChecked(value == target.anchor)
-            else:
-                animate_widget_enter(self._primary_stack.currentWidget(), distance=3, duration_ms=150)
         self.route_changed.emit(target.workbench, target.anchor)
         return target
 

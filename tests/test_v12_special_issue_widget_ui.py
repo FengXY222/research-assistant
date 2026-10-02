@@ -9,6 +9,7 @@ from unittest import TestCase
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
 from tests import _data_root  # noqa: F401
@@ -72,7 +73,11 @@ class SpecialIssueWidgetUiTests(TestCase):
         self.page = SpecialIssuePage(today_provider=lambda: date(2026, 8, 31))
         self.page.resize(400, 480)
         self.page.show()
-        self.application.processEvents()
+        for _attempt in range(100):
+            self.application.processEvents()
+            if self.page.preview_rows:
+                break
+            QTest.qWait(10)
 
     def tearDown(self) -> None:
         self.page.close()

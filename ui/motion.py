@@ -45,6 +45,12 @@ def animate_widget_enter(
     previous = getattr(widget, "_v12_enter_animation", None)
     if isinstance(previous, QParallelAnimationGroup):
         previous.stop()
+        setattr(widget, "_v12_enter_animation", None)
+        try:
+            widget.setGraphicsEffect(None)
+        except RuntimeError:
+            pass
+        previous.deleteLater()
 
     target = widget.pos()
     effect = QGraphicsOpacityEffect(widget)
@@ -78,7 +84,8 @@ def animate_widget_enter(
         except RuntimeError:
             # Lazy page replacement may retire the placeholder before its
             # restrained entrance animation posts this cleanup callback.
-            return
+            pass
+        group.deleteLater()
 
     group.finished.connect(lambda: QTimer.singleShot(0, cleanup))
     group.start()

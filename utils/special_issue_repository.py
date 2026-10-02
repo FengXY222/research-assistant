@@ -166,18 +166,33 @@ def _store_path() -> Path:
     return file_manager.SPECIAL_ISSUES_FILE
 
 
+def _database():
+    database = file_manager.business_data_store()
+    if not database.has_dataset("special_issues") and _store_path().is_file():
+        load_special_issue_store()
+    return database
+
+
 @_serialized
 def load_special_issue_store() -> dict[str, Any]:
+    database = file_manager.business_data_store()
+    stored = database.load_special_issues()
+    if stored is not None:
+        return normalize_special_issue_store(stored)
     path = _store_path()
     if not path.is_file():
-        return normalize_special_issue_store({})
+        empty = normalize_special_issue_store({})
+        database.save_special_issues(empty)
+        return empty
     try:
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise SpecialIssueRepositoryError(f"无法读取特刊数据: {error}") from error
     if not isinstance(payload, dict):
         raise SpecialIssueRepositoryError("特刊数据文件必须是 JSON 对象")
-    return normalize_special_issue_store(payload)
+    normalized = normalize_special_issue_store(payload)
+    database.save_special_issues(normalized)
+    return normalized
 
 
 def _summary_path() -> Path:
@@ -297,27 +312,31 @@ def _write_overview(store: dict[str, Any], signature: dict[str, int] | None = No
 
 
 def load_special_issue_overview() -> dict[str, Any]:
-    """Load the small UI index, rebuilding it when the full store changed."""
+    """Query only records reachable from the compact workbench views."""
 
-    signature = _source_signature()
-    path = _summary_path()
-    if path.is_file():
-        try:
-            cached = json.loads(path.read_text(encoding="utf-8-sig"))
-            if isinstance(cached, dict) and cached.get("source_signature") == signature:
-                return cached
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            pass
-    store = load_special_issue_store()
-    latest_signature = _source_signature()
-    if latest_signature != signature:
-        store = load_special_issue_store()
-        latest_signature = _source_signature()
-    overview = _build_overview(store, latest_signature)
-    try:
-        _write_overview(store, latest_signature)
-    except OSError:
-        pass
+    from utils.special_issue_policy import CONTENT_THRESHOLD
+
+    database = file_manager.business_data_store()
+    overview = database.load_special_overview(legacy_threshold=CONTENT_THRESHOLD)
+    if overview is not None:
+        overview["items"] = [
+            _overview_projection(item)
+            for item in overview.get("items", [])
+            if isinstance(item, dict)
+        ]
+        return overview
+    # First use performs a lossless one-time import, then immediately switches
+    # to indexed overview queries.  Later page opens never parse the legacy
+    # full-store JSON or depend on a disposable summary file.
+    load_special_issue_store()
+    overview = database.load_special_overview(legacy_threshold=CONTENT_THRESHOLD)
+    if overview is None:
+        return normalize_special_issue_store({})
+    overview["items"] = [
+        _overview_projection(item)
+        for item in overview.get("items", [])
+        if isinstance(item, dict)
+    ]
     return overview
 
 
@@ -334,20 +353,16 @@ def _prepare_store(store: dict[str, Any]) -> dict[str, Any]:
 def save_special_issue_store(store: dict[str, Any]) -> None:
     try:
         prepared = _prepare_store(store)
-        apply_json_transaction({_store_path(): prepared})
+        file_manager.business_data_store().save_special_issues(prepared)
     except Exception as error:
         raise SpecialIssueRepositoryError(f"保存特刊数据失败: {error}") from error
-    # The overview is a disposable acceleration index.  A locked or
-    # read-only cache path must never turn a successful authoritative save
-    # into an apparent failure that callers might retry.
-    try:
-        _write_overview(prepared, _source_signature())
-    except (OSError, TypeError, ValueError):
-        pass
 
 
 def resolve_special_issue_id(issue_id: str, store: dict[str, Any] | None = None) -> str:
-    aliases = (store if store is not None else load_special_issue_store()).get("id_aliases", {})
+    if store is None:
+        aliases = _database().special_issue_aliases()
+    else:
+        aliases = store.get("id_aliases", {})
     wanted, seen = str(issue_id), set()
     while wanted in aliases:
         if wanted in seen:
@@ -423,8 +438,13 @@ def register_special_issue_alias(old_id: str, canonical_id: str) -> None:
             task["special_issue_id"] = target
             if isinstance(task.get("source"), dict):
                 task["source"]["id"] = target
-    apply_json_transaction({_store_path(): _prepare_store(store), file_manager.PAPERS_FILE: papers,
-                            file_manager.TODO_FILE: {"version": 2, "tasks": tasks}})
+    apply_json_transaction(
+        {
+            file_manager.PAPERS_FILE: papers,
+            file_manager.TODO_FILE: {"version": 2, "tasks": tasks},
+        }
+    )
+    save_special_issue_store(store)
 
 
 def _require_issue(store: dict[str, Any], issue_id: str) -> dict[str, Any]:
@@ -450,15 +470,23 @@ def _append_unique(values: Any, value: str) -> list[str]:
 @_serialized
 def associate_special_issue(issue_id: str, paper_ids: list[str]) -> None:
     """Link existing papers to one issue without touching any other file."""
-    store = load_special_issue_store()
-    issue = _require_issue(store, issue_id)
+    database = _database()
+    issue_id = resolve_special_issue_id(issue_id)
+    issue = database.get_special_issue(issue_id)
+    if issue is None:
+        raise ValueError("找不到所选特刊")
     known_ids = {str(value.get("id", "")).strip() for value in file_manager.load_papers()}
     requested = _unique_strings(paper_ids)
     unknown = [value for value in requested if value not in known_ids]
     if unknown:
         raise ValueError("关联论文不存在: " + "、".join(unknown))
-    issue["linked_paper_ids"] = _unique_strings([*issue.get("linked_paper_ids", []), *requested])
-    save_special_issue_store(store)
+    database.update_special_user_state(
+        issue_id,
+        {
+            "linked_paper_ids": _unique_strings([*issue.get("linked_paper_ids", []), *requested]),
+            "personal_revision": int(issue.get("personal_revision", 0)) + 1,
+        },
+    )
 
 
 @_serialized
@@ -485,22 +513,31 @@ def set_special_issue_status(issue_id: str, status: str) -> None:
 
 @_serialized
 def set_special_issue_scope_note(issue_id: str, note: str) -> None:
-    store = load_special_issue_store()
-    issue = _require_issue(store, issue_id)
-    issue["personal_scope_note"] = str(note or "").strip()[:12000]
-    issue["personal_revision"] = int(issue.get("personal_revision", 0)) + 1
-    save_special_issue_store(store)
+    database = _database()
+    issue_id = resolve_special_issue_id(issue_id)
+    issue = database.get_special_issue(issue_id)
+    if issue is None:
+        raise ValueError("找不到所选特刊")
+    database.update_special_scope_note(issue_id, note)
+    database.update_special_user_state(
+        issue_id,
+        {"personal_revision": int(issue.get("personal_revision", 0)) + 1},
+    )
 
 
 @_serialized
 def set_special_issue_personal_state(issue_id: str, **changes: Any) -> None:
     if set(changes) - {"saved", "ignored", "is_read", "read_at"}:
         raise ValueError("不支持的个人状态字段")
-    store = load_special_issue_store()
-    issue = _require_issue(store, issue_id)
-    issue.update(changes)
-    issue["personal_revision"] = int(issue.get("personal_revision", 0)) + 1
-    save_special_issue_store(store)
+    database = _database()
+    issue_id = resolve_special_issue_id(issue_id)
+    issue = database.get_special_issue(issue_id)
+    if issue is None:
+        raise ValueError("找不到所选特刊")
+    database.update_special_user_state(
+        issue_id,
+        {**changes, "personal_revision": int(issue.get("personal_revision", 0)) + 1},
+    )
 
 
 @_serialized
@@ -599,7 +636,6 @@ def add_special_issue_journal_to_library(
     today: date | None = None,
 ) -> dict[str, Any]:
     """Import a special issue's journal without creating a submission path."""
-    from utils.action_transaction import apply_json_transaction
     from utils.journal_selection_service import special_issue_to_library_journal
 
     day = today or date.today()
@@ -615,12 +651,8 @@ def add_special_issue_journal_to_library(
         journals.append(journal)
     issue["journal_library_id"] = str(journal.get("id", ""))
     _log_action(store, f"library:{issue['id']}", issue["journal_library_id"])
-    apply_json_transaction(
-        {
-            file_manager.SPECIAL_ISSUES_FILE: _prepare_store(store),
-            file_manager.JOURNALS_FILE: [file_manager.normalize_library_journal(value) for value in journals],
-        }
-    )
+    file_manager.save_journal_library(journals)
+    save_special_issue_store(store)
     return {"journal_id": str(journal.get("id", "")), "created": created}
 
 
@@ -663,15 +695,14 @@ def add_special_issue_to_submission_path(
     issue["submission_path_refs"] = _append_unique(issue.get("submission_path_refs", []), reference)
     issue["journal_library_id"] = str(journal.get("id", ""))
     _log_action(store, f"path:{issue_id}:{paper_id}", candidate["id"])
-    normalized_store = _prepare_store(store)
     normalized_journals = [file_manager.normalize_library_journal(value) for value in journals]
     apply_json_transaction(
         {
-            file_manager.SPECIAL_ISSUES_FILE: normalized_store,
             file_manager.PAPERS_FILE: papers,
-            file_manager.JOURNALS_FILE: normalized_journals,
         }
     )
+    file_manager.save_journal_library(normalized_journals)
+    save_special_issue_store(store)
     return {"journal_id": str(journal.get("id", "")), "path_id": str(candidate.get("id", ""))}
 
 
@@ -731,10 +762,6 @@ def create_special_issue_preparation_task(
     _log_action(store, f"task:{issue_id}:{paper_id}", task_id)
     issue["linked_paper_ids"] = _append_unique(issue.get("linked_paper_ids", []), str(paper_id))
     issue["created_task_ids"] = _append_unique(issue.get("created_task_ids", []), task_id)
-    apply_json_transaction(
-        {
-            file_manager.SPECIAL_ISSUES_FILE: _prepare_store(store),
-            file_manager.TODO_FILE: {"version": 2, "tasks": tasks},
-        }
-    )
+    apply_json_transaction({file_manager.TODO_FILE: {"version": 2, "tasks": tasks}})
+    save_special_issue_store(store)
     return task_id

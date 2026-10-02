@@ -9,7 +9,8 @@ from datetime import datetime
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QParallelAnimationGroup, QThread, Qt
+from PySide6.QtWidgets import QApplication, QGraphicsEffect, QPushButton
 
 from tests import _data_root  # noqa: F401 - isolate persistence before imports
 from ui.journal_library_page import JournalLibraryPage
@@ -61,7 +62,7 @@ def test_journal_changes_refresh_dependent_pages_only_when_opened() -> None:
     window = MainWindow()
     calls: list[str] = []
     window.paper_page.reload = lambda: calls.append("papers")
-    window.frontier_page.reload = lambda: calls.append("frontier")
+    window.frontier_page.request_reload = lambda: calls.append("frontier")
 
     window._on_journal_data_changed()
 
@@ -71,6 +72,7 @@ def test_journal_changes_refresh_dependent_pages_only_when_opened() -> None:
     assert calls == ["frontier"]
     assert "frontier" not in window._dirty_pages
     window.navigate("papers")
+    QApplication.processEvents()
     assert calls == ["frontier", "papers"]
     if window.tray_icon:
         window.tray_icon.hide()
@@ -108,7 +110,8 @@ def test_special_issue_overview_keeps_visible_and_personal_rows_without_discover
     visible = next(item for item in overview["items"] if item["id"] == "visible")
     assert "deadline_candidates" not in visible
     assert len(visible["source_evidence"]) == 80
-    assert file_manager.SPECIAL_ISSUES_SUMMARY_FILE.is_file()
+    assert not file_manager.SPECIAL_ISSUES_SUMMARY_FILE.is_file()
+    assert file_manager.BUSINESS_DATA_FILE.is_file()
 
 
 def test_runtime_discards_old_payload_but_keeps_failed_source_metadata() -> None:
@@ -157,3 +160,110 @@ def test_oversized_runtime_is_compacted_on_first_load() -> None:
 
     assert "payload" not in loaded["batches"][first_id]["stages"]["recall"]
     assert file_manager.V13_RUNTIME_FILE.stat().st_size < 1024 * 1024
+
+
+def test_achievements_lazy_page_cannot_remain_on_preparing_placeholder(tmp_path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    runtime_log = tmp_path / "runtime.log"
+    monkeypatch.setattr(file_manager, "RUNTIME_LOG_FILE", runtime_log)
+    window = MainWindow()
+
+    window.navigate("papers", "results")
+    QTest.qWait(120)
+    app.processEvents()
+
+    assert "achievements" in window._loaded_pages
+    assert "achievements" not in window._page_loaders
+    events = [json.loads(line)["event"] for line in runtime_log.read_text(encoding="utf-8").splitlines()]
+    assert "lazy_page_requested" in events
+    assert "lazy_page_ready" in events
+    if window.tray_icon:
+        window.tray_icon.hide()
+    window._global_hotkey.close()
+    window._visibility_hotkey.close()
+    window.close()
+
+
+def test_child_result_chip_routes_through_main_window_lazy_loader() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    result_chip = next(
+        button
+        for button in window.workbench_shell.findChildren(QPushButton)
+        if button.property("workbench_anchor") == "results"
+    )
+
+    QTest.mouseClick(result_chip, Qt.MouseButton.LeftButton)
+    QTest.qWait(120)
+    app.processEvents()
+
+    assert window.workbench_shell.current_route.anchor == "results"
+    assert "achievements" in window._loaded_pages
+    if window.tray_icon:
+        window.tray_icon.hide()
+    window._global_hotkey.close()
+    window._visibility_hotkey.close()
+    window.close()
+
+
+def test_complex_page_switches_do_not_accumulate_full_page_animations() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    for _index in range(30):
+        window.navigate("frontier")
+        window.navigate("journals")
+        window.navigate("special_issues")
+        window.navigate("papers")
+    app.processEvents()
+
+    assert window.workbench_shell.findChildren(QParallelAnimationGroup) == []
+    assert window.workbench_shell.findChildren(QGraphicsEffect) == []
+    if window.tray_icon:
+        window.tray_icon.hide()
+    window._global_hotkey.close()
+    window._visibility_hotkey.close()
+    window.close()
+
+
+def test_user_activity_cancels_tracked_idle_worker_even_after_queue_is_empty() -> None:
+    class CooperativeWorker(QThread):
+        def run(self) -> None:
+            while not self.isInterruptionRequested():
+                self.msleep(5)
+
+    QApplication.instance() or QApplication([])
+    window = MainWindow()
+    worker = CooperativeWorker(window)
+    window._idle_background_workers.add(worker)
+    window._idle_tasks_running = False
+    worker.start()
+
+    window._cancel_idle_background_work()
+
+    assert worker.wait(1000)
+    if window.tray_icon:
+        window.tray_icon.hide()
+    window._global_hotkey.close()
+    window._visibility_hotkey.close()
+    window.close()
+
+
+def test_finished_lazy_worker_without_signal_recovers_on_gui_thread() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    silent_loader = object()
+    window._page_loaders["achievements"] = silent_loader
+    window._page_load_started["achievements"] = 0.0
+
+    window._page_import_finished("achievements", silent_loader)
+    QTest.qWait(80)
+    app.processEvents()
+
+    assert "achievements" in window._loaded_pages
+    assert "achievements" not in window._page_loaders
+    if window.tray_icon:
+        window.tray_icon.hide()
+    window._global_hotkey.close()
+    window._visibility_hotkey.close()
+    window.close()

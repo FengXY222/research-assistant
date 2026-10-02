@@ -188,7 +188,7 @@ def test_v12_refresh_persists_stream_states_and_core_mix(tmp_path: Path, monkeyp
     monkeypatch.setattr(frontier_service, "review_frontier_content", lambda profile, items, journals, **kwargs:
         [dict(item, content_decision="accept", admission_version="test") for item in items])
     monkeypatch.setattr(frontier_service, "is_easyscholar_ready", lambda: True)
-    monkeypatch.setattr(frontier_service, "RESEARCH_INTELLIGENCE_CACHE_FILE", tmp_path / "cache.sqlite", raising=False)
+    monkeypatch.setattr(frontier_service.file_manager, "RESEARCH_INTELLIGENCE_CACHE_FILE", tmp_path / "cache.sqlite")
     journals = [
         {
             "name": "Verified Journal",

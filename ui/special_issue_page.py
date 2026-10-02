@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
+import os
 from typing import Callable
 
 from ui.page_kit import ElidedLabel, PageHeader
 
-from PySide6.QtCore import QSize, QThread, Qt, Signal
+from PySide6.QtCore import QSize, QThread, Qt, Signal, QTimer
 from PySide6.QtGui import QFontMetrics, QMouseEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -46,6 +47,23 @@ class SpecialIssueRefreshThread(QThread):
             self.failed.emit(str(error))
             return
         self.completed.emit(result)
+
+
+class SpecialIssueLoadThread(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        if self.isInterruptionRequested():
+            return
+        try:
+            result = load_special_issue_overview()
+        except Exception as error:  # noqa: BLE001 - existing preview stays usable
+            if not self.isInterruptionRequested():
+                self.failed.emit(str(error))
+            return
+        if not self.isInterruptionRequested():
+            self.completed.emit(result)
 
 
 class SpecialIssuePreviewRow(QFrame):
@@ -144,13 +162,20 @@ class SpecialIssuePage(QWidget):
         self.preview_issue_ids: list[str] = []
         self.preview_rows: list[SpecialIssuePreviewRow] = []
         self._refresh_worker: SpecialIssueRefreshThread | None = None
+        self._load_worker: SpecialIssueLoadThread | None = None
         self._loaded = False
         self._build_ui()
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt API
         super().showEvent(event)
         if not self._loaded:
-            self.reload()
+            if self.window() is self:
+                self.reload()
+                return
+            if os.environ.get("RESEARCH_ASSISTANT_DISABLE_BACKGROUND") == "1":
+                self.reload()
+            else:
+                self.request_reload()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -215,6 +240,43 @@ class SpecialIssuePage(QWidget):
             store = load_special_issue_overview()
         except Exception:
             store = {"items": []}
+        self._apply_loaded_store(store)
+
+    def request_reload(self) -> None:
+        if self._load_worker is not None and self._load_worker.isRunning():
+            return
+        worker = SpecialIssueLoadThread(self)
+        worker.completed.connect(self._apply_loaded_store)
+        worker.failed.connect(lambda message: self.refresh_status.setText(f"后台载入失败：{message}"))
+        worker.finished.connect(self._release_load_worker)
+        self._load_worker = worker
+        worker.start(QThread.Priority.LowPriority)
+
+    def _release_load_worker(self) -> None:
+        worker = self._load_worker
+        self._load_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        waiting = False
+        for worker in (self._load_worker, self._refresh_worker):
+            if worker is not None and worker.isRunning():
+                worker.requestInterruption()
+                waiting = True
+        if waiting:
+            event.ignore()
+            QTimer.singleShot(100, self.close)
+            return
+        super().closeEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._load_worker is not None and self._load_worker.isRunning():
+            self._load_worker.requestInterruption()
+        super().hideEvent(event)
+
+    def _apply_loaded_store(self, store: object) -> None:
+        store = store if isinstance(store, dict) else {"items": []}
         self._loaded = True
         items = [value for value in store.get("items", []) if isinstance(value, dict)]
         now = datetime.combine(self._today_provider(), time(hour=12))

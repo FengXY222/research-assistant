@@ -14,7 +14,7 @@ from utils.action_transaction import apply_json_transaction
 
 
 STAGES = ("recall", "enrich", "deduplicate", "filter", "score", "commit")
-TERMINAL_STATES = {"success", "partial", "cancelled"}
+TERMINAL_STATES = {"success", "partial", "aborted"}
 
 
 def _signature(value: Any) -> str:
@@ -171,7 +171,7 @@ def begin_batch(
         and batch.get("input_signature") == signature
         and batch.get("state") not in TERMINAL_STATES
     ]
-    if candidates and not manual:
+    if candidates:
         candidates.sort(key=lambda value: str(value.get("created_at", "")), reverse=True)
         return result, str(candidates[0]["id"]), True
     batch_id = f"{task}-{day}-{uuid4().hex[:12]}"
@@ -235,7 +235,7 @@ def checkpoint(
         batch["state"] = "failed"
         batch["last_error_stage"] = stage
     elif state == "cancelled":
-        batch["state"] = "cancelled"
+        batch["state"] = "paused"
     elif stage == "commit" and state in {"success", "partial"}:
         batch["state"] = state
         task = str(batch.get("task", ""))
